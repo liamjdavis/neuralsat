@@ -48,6 +48,10 @@ class DomainsList:
         self.all_conflict_clauses = {int(_): [] for _ in objective_ids}
         self.use_restart = Settings.use_restart and (lower_bounds is not None) and (not input_split)
         
+        # Global UNSAT core cache for cross-property incremental verification
+        # Initialized empty; populated by save_conflict_clauses when domains prove UNSAT
+        self.global_unsat_cores = []  # List[List[int]] - SAT clauses learned from all properties
+        
         # unverified indices 
         remain_idx = torch.where((output_lbs.detach().cpu() <= rhs.detach().cpu()).all(1))[0]
         
@@ -286,14 +290,54 @@ class DomainsList:
         
         # hidden splitting
         if not self.input_split:
-            # using restart
+            # Global UNSAT core pruning (runs on every iteration, not just restarts)
+            if hasattr(self, 'global_unsat_cores') and len(self.global_unsat_cores) > 0:
+                logger.debug(f"[Global core] Checking {len(remaining_index)} domains against {len(self.global_unsat_cores)} cached cores")
+                
+                global_conflict_index = []
+                for idx_ in remaining_index:
+                    # Convert tensor index to int
+                    idx_int = int(idx_.item()) if isinstance(idx_, torch.Tensor) else int(idx_)
+                    
+                    # extract fixed literals from bound propagation
+                    fixed_literals = self._extract_fixed_literals_from_bounds(
+                        domain_params.lower_bounds,
+                        domain_params.upper_bounds,
+                        idx_int
+                    )
+                    
+                    if len(fixed_literals) > 0:
+                        # create temporary SAT solver with global cores
+                        from heuristic.sat_solver import SATSolver
+                        temp_solver = SATSolver(self.global_unsat_cores)
+                        
+                        # check if current fixed literals conflict with cores
+                        if not temp_solver.multiple_assign(fixed_literals):
+                            global_conflict_index.append(idx_int)
+                            logger.debug(f'[Global core] Pruned domain {idx_int} via assignment conflict')
+                            continue
+                        
+                        # run BCP to detect implied conflicts
+                        bcp_stat, _ = temp_solver.bcp()
+                        if not bcp_stat:
+                            global_conflict_index.append(idx_int)
+                            logger.debug(f'[Global core] Pruned domain {idx_int} via BCP conflict')
+                            continue
+                
+                # Remove globally-conflicted domains from remaining_index
+                if len(global_conflict_index):
+                    logger.info(f'[Global core] Pruned {len(global_conflict_index)} domains')
+                    for gci in global_conflict_index:
+                        remaining_index = remaining_index[remaining_index != gci]
+            
+            # Local SAT checking (restart-only, uses per-domain SAT solvers)
             if self.all_sat_solvers is not None:
                 assert len(domain_params.sat_solvers) == batch
                 assert decisions is not None
                 
                 extra_conflict_index = []
                 for idx_ in remaining_index:
-                    # bcp
+                    # local SAT check via boolean propagation
                     new_sat_solver = self.boolean_propagation(
                         domain_params=domain_params, 
                         decisions=decisions, 
@@ -306,7 +350,7 @@ class DomainsList:
                     self.all_sat_solvers.append(new_sat_solver)
                     
                 if len(extra_conflict_index):
-                    logger.debug(f'BCP removes {len(extra_conflict_index)} domains')
+                    logger.debug(f'[Local SAT] BCP removes {len(extra_conflict_index)} domains')
                     assert len(extra_conflict_index) == len(list(set(extra_conflict_index)))
                     for eci in extra_conflict_index:
                         remaining_index = remaining_index[remaining_index != eci]
@@ -316,10 +360,26 @@ class DomainsList:
             self.all_betas.extend([domain_params.betas[i] for i in remaining_index])
             
             # conflict clauses
+            unsat_indices = torch.tensor([i for i in range(len(domain_params.input_lowers)) if i not in remaining_index]).int()
             self.save_conflict_clauses(
                 domain_params=domain_params, 
-                select_index=torch.tensor([i for i in range(len(domain_params.input_lowers)) if i not in remaining_index]).int(),
+                select_index=unsat_indices,
             )
+            
+            # Populate global UNSAT core cache for incremental verification
+            # Convert decision trails of UNSAT domains to clauses and cache globally
+            if hasattr(domain_params, 'histories') and domain_params.histories is not None:
+                from heuristic.util import _history_to_conflict_clause
+                for idx in unsat_indices:
+                    if idx < len(domain_params.histories):
+                        # Convert history (decision trail) to SAT clause
+                        clause = _history_to_conflict_clause(
+                            domain_params.histories[idx], 
+                            self.var_mapping
+                        )
+                        if len(clause) > 0:
+                            self.global_unsat_cores.append(clause)
+                            logger.debug(f'[Global core] Cached UNSAT core with {len(clause)} literals')
 
         # hidden bounds
         if self.all_lower_bounds is not None:
@@ -456,5 +516,47 @@ class DomainsList:
         n_unstable = sum([_.sum() for _ in new_masks.values()]).int()
         return n_unstable // len(self)
 
+    
+    @beartype
+    def _extract_fixed_literals_from_bounds(self: 'DomainsList', lower_bounds: dict, 
+                                            upper_bounds: dict, batch_idx: int) -> list[int]:
+        """Extract SAT literals for neurons fixed by bound propagation.
+        
+        Args:
+            lower_bounds: Lower bounds per layer
+            upper_bounds: Upper bounds per layer
+            batch_idx: Index of the domain to extract from
+            
+        Returns:
+            List of SAT literals (positive = active, negative = inactive)
+            
+        Justification:
+            Bound propagation may have fixed neurons beyond explicit branching decisions.
+            These fixes are valid assumptions that must be consistent with UNSAT cores.
+            By converting them to SAT literals, we can check if they conflict with
+            previously learned cores before running expensive abstraction.
+        """
+        literals = []
+        
+        for layer_name in lower_bounds.keys():
+            # Get bounds for this specific domain
+            layer_lower = lower_bounds[layer_name][batch_idx].flatten().detach().cpu()
+            layer_upper = upper_bounds[layer_name][batch_idx].flatten().detach().cpu()
+            
+            # Identify fixed neurons (ReLU assumption: fixed if bounds cross zero)
+            for neuron_id in range(len(layer_lower)):
+                if layer_lower[neuron_id] >= 0:
+                    # Neuron provably active (lower bound >= 0)
+                    var = self.var_mapping.get((layer_name, neuron_id))
+                    if var is not None:
+                        literals.append(var)
+                        
+                elif layer_upper[neuron_id] <= 0:
+                    # Neuron provably inactive (upper bound <= 0)
+                    var = self.var_mapping.get((layer_name, neuron_id))
+                    if var is not None:
+                        literals.append(-var)
+        
+        return literals
         
     from .util import init_sat_solver, update_hidden_bounds_histories, boolean_propagation, save_conflict_clauses

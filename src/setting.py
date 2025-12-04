@@ -40,7 +40,7 @@ class GlobalSettings(BaseSettings):
         self.skip_preprocess = False
         
         # proof
-        self.use_save_reasoning_step = False
+        self.use_save_reasoning_step = True
         
         # early stopping
         self.max_iterations = 1e9
