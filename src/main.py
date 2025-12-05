@@ -23,7 +23,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--net', type=str, required=True,
                         help="load pretrained ONNX model from this specified path.")
-    parser.add_argument('--spec', type=str, required=True,
+    parser.add_argument('--spec', type=str, required=False,
+                        help="path to VNNLIB specification file.")
+    parser.add_argument('--incremental-specs', type=str, nargs='+', required=False,
                         help="path to VNNLIB specification file.")
     parser.add_argument('--input_shape', type=int, nargs='+', default=None,
                         help="Input shape of network, e.g., --input_shape 1 3 32 32")
@@ -58,7 +60,13 @@ if __name__ == '__main__':
     parser.add_argument('--export_runtime', action='store_true', required=False,
                         help="output runtime.")
     
-    args = parser.parse_args()   
+    args = parser.parse_args()
+
+    if args.spec is None and args.incremental_specs is None:
+        parser.error("one of the arguments --spec or --incremental-specs is required")
+    
+    specs = args.incremental_specs if args.incremental_specs else [args.spec]
+
     Settings.setup(args)
     print(Settings)
         
@@ -84,9 +92,6 @@ if __name__ == '__main__':
     logger.info(f'[!] Input shape: {input_shape}')
     logger.info(f'[!] Output shape: {output_shape}')
     
-    # specification
-    objectives = parse_vnnlib(args.spec, input_shape)
-    
     # verifier
     verifier = Verifier(
         net=model, 
@@ -94,37 +99,45 @@ if __name__ == '__main__':
         batch=args.batch,
         device=args.device,
     )
-    
-    
-    # verify
-    timeout = args.timeout - (time.time() - START_TIME)
-    status = verifier.verify(objectives, timeout=timeout, force_split=args.force_split)
-    runtime = time.time() - START_TIME
-    
-    # output
-    logger.info(f'[!] Iterations: {verifier.iteration}')
-    if verifier.adv is not None:
-        logger.info(f'adv (first 5): {verifier.adv.flatten()[:5].detach().cpu()}')
-        logger.debug(f'output: {verifier.net(verifier.adv).flatten().detach().cpu()}')
+
+    # remove result file if exists
+    if args.result_file and os.path.exists(args.result_file):
+        os.remove(args.result_file)
+
+    for i, spec in enumerate(specs):
+        logger.info(f'[!] Verifying spec: {spec}')
         
-    # export
-    if args.result_file:
-        os.remove(args.result_file) if os.path.exists(args.result_file) else None
-        with open(args.result_file, 'w') as fp:
-            if args.export_runtime:
-                print(f'{status},{runtime:.04f}', file=fp)
+        # specification
+        objectives = parse_vnnlib(spec, input_shape)
+        
+        # verify
+        timeout = args.timeout - (time.time() - START_TIME)
+        status = verifier.verify(objectives, timeout=timeout, force_split=args.force_split)
+        runtime = time.time() - START_TIME
+        
+        # output
+        logger.info(f'[!] Iterations: {verifier.iteration}')
+        if verifier.adv is not None:
+            logger.info(f'adv (first 5): {verifier.adv.flatten()[:5].detach().cpu()}')
+            logger.debug(f'output: {verifier.net(verifier.adv).flatten().detach().cpu()}')
+            
+        # export
+        if args.result_file:
+            with open(args.result_file, 'a') as fp:
+                if args.export_runtime:
+                    print(f'{status},{runtime:.04f}', file=fp)
+                else:
+                    print(status, file=fp)
+                if (verifier.adv is not None) and args.export_cex:
+                    print(get_adv_string(inputs=verifier.adv, net_path=args.net), file=fp)
+
+        if args.reasoning_file and Settings.use_save_reasoning_step:
+            if hasattr(verifier, 'domains_list') and not isinstance(verifier.domains_list, list):
+                verifier.domains_list.reasoning_domains.export(args.reasoning_file)
             else:
-                print(status, file=fp)
-            if (verifier.adv is not None) and args.export_cex:
-                print(get_adv_string(inputs=verifier.adv, net_path=args.net), file=fp)
+                print(f'[!] Does not have any reasoning step')
 
-    if args.reasoning_file and Settings.use_save_reasoning_step:
-        if hasattr(verifier, 'domains_list') and not isinstance(verifier.domains_list, list):
-            verifier.domains_list.reasoning_domains.export(args.reasoning_file)
-        else:
-            print(f'[!] Does not have any reasoning step')
-
-    logger.info(f'[!] Result: {status}')
-    logger.info(f'[!] Runtime: {runtime:.04f}')
-    
-    print(f'{status},{runtime:.04f}')
+        logger.info(f'[!] Result: {status}')
+        logger.info(f'[!] Runtime: {runtime:.04f}')
+        
+        print(f'{status},{runtime:.04f}')
