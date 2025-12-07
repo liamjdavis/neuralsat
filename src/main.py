@@ -65,7 +65,7 @@ if __name__ == '__main__':
     if args.spec is None and args.incremental_specs is None:
         parser.error("one of the arguments --spec or --incremental-specs is required")
     
-    specs = args.incremental_specs if args.incremental_specs else [args.spec]
+    specs = args.incremental_specs if args.incremental_specs         else [args.spec]
 
     Settings.setup(args)
     print(Settings)
@@ -104,6 +104,8 @@ if __name__ == '__main__':
     if args.result_file and os.path.exists(args.result_file):
         os.remove(args.result_file)
 
+    incremental_preconditions = []
+
     for i, spec in enumerate(specs):
         logger.info(f'[!] Verifying spec: {spec}')
         
@@ -112,8 +114,16 @@ if __name__ == '__main__':
         
         # verify
         timeout = args.timeout - (time.time() - START_TIME)
-        status = verifier.verify(objectives, timeout=timeout, force_split=args.force_split)
+        status = verifier.verify(objectives, preconditions=incremental_preconditions, timeout=timeout, force_split=args.force_split)
         runtime = time.time() - START_TIME
+
+        # collect new preconditions
+        new_preconditions = []
+        for v in verifier.all_conflict_clauses.values():
+            new_preconditions.extend(v)
+        incremental_preconditions.extend(new_preconditions)
+        verifier.all_conflict_clauses = {} # clear for next run
+        logger.info(f'[!] Transferred {len(new_preconditions)} UNSAT cores')
         
         # output
         logger.info(f'[!] Iterations: {verifier.iteration}')
