@@ -15,7 +15,36 @@ from verifier.verifier import Verifier
 
 from setting import Settings
 
- 
+def _resolve_with_bab(objectives, preconditions, time_limit):
+    """ Reverify using BaB with the shortened time limit, used to find UNSAT cores even after SAT is found """
+    logger.info(f'[!] Re-solving with BaB for {time_limit} seconds to find UNSAT cores.')
+
+    # Create temp verifier instance
+    temp_verifier = Verifier(
+        net=model,
+        input_shape=input_shape,
+        batch=args.batch,
+        device=args.device,
+    )
+
+    # Re-solve forcing BaB with time limit
+    status = temp_verifier.verify(
+        objectives,
+        preconditions=incremental_preconditions,
+        timeout=time_limit,
+        force_split='hidden',
+        disable_attack=True
+    )
+
+    # Collect new cores
+    new_cores = []
+
+    for v in temp_verifier.all_conflict_clauses.values():
+        new_cores.extend(v)
+
+    logger.info(f'[!] Re-solving found {len(new_cores)} new UNSAT cores.')
+    return new_cores
+
 if __name__ == '__main__':
     START_TIME = time.time()
 
@@ -59,13 +88,14 @@ if __name__ == '__main__':
                         help="test on small example with special settings.")
     parser.add_argument('--export_runtime', action='store_true', required=False,
                         help="output runtime.")
+    parser.add_argument('--resolve-time-limit', type=float, default=10, required=False)
     
     args = parser.parse_args()
 
     if args.spec is None and args.incremental_specs is None:
         parser.error("one of the arguments --spec or --incremental-specs is required")
     
-    specs = args.incremental_specs if args.incremental_specs         else [args.spec]
+    specs = args.incremental_specs if args.incremental_specs else [args.spec]
 
     Settings.setup(args)
     print(Settings)
@@ -104,6 +134,7 @@ if __name__ == '__main__':
     if args.result_file and os.path.exists(args.result_file):
         os.remove(args.result_file)
 
+    # define the incremental preconditions list
     incremental_preconditions = []
 
     for i, spec in enumerate(specs):
@@ -149,5 +180,15 @@ if __name__ == '__main__':
 
         logger.info(f'[!] Result: {status}')
         logger.info(f'[!] Runtime: {runtime:.04f}')
-        
+
+        # if condition is SAT, reverify under time limit
+        if status == 'sat':
+            # Reverify using BaB with time limit
+            new_cores = _resolve_with_bab(objectives=objectives, preconditions=incremental_preconditions, time_limit=args.resolve_time_limit)
+
+            # Add new cores to preconditions
+            incremental_preconditions.extend(new_cores)
+
         print(f'{status},{runtime:.04f}')
+
+

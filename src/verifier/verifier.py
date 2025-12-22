@@ -67,7 +67,7 @@ class Verifier:
         return objective
     
     @beartype
-    def verify(self: 'Verifier', dnf_objectives: 'DnfObjectives', preconditions: list = [], timeout: int | float = 3600.0, force_split: str | None = None) -> str:
+    def verify(self: 'Verifier', dnf_objectives: 'DnfObjectives', preconditions: list = [], timeout: int | float = 3600.0, force_split: str | None = None, disable_attack: bool = False) -> str:
         self.start_time = time.time()
         self.total_time = timeout
         self.status = self._verify(
@@ -75,19 +75,21 @@ class Verifier:
             preconditions=preconditions,
             timeout=timeout,
             force_split=force_split,
+            disable_attack=disable_attack,
         )
         return self.status
     
     
     @beartype
-    def _verify(self: 'Verifier', dnf_objectives: 'DnfObjectives', preconditions: list, timeout: int | float = 3600.0, force_split: str | None = None) -> str:
+    def _verify(self: 'Verifier', dnf_objectives: 'DnfObjectives', preconditions: list, timeout: int | float = 3600.0, force_split: str | None = None, disable_attack: bool = False) -> str:
         if not len(dnf_objectives):
             return ReturnStatus.UNSAT
         
         # attack
-        is_attacked, self.adv = self._pre_attack(copy.deepcopy(dnf_objectives), timeout=min(20.0, timeout * 0.1))
-        if is_attacked:
-            return ReturnStatus.SAT  
+        if not disable_attack:
+            is_attacked, self.adv = self._pre_attack(copy.deepcopy(dnf_objectives), timeout=min(20.0, timeout * 0.1))
+            if is_attacked:
+                return ReturnStatus.SAT  
 
         # refine
         dnf_objectives, reference_bounds = self._preprocess(dnf_objectives, force_split=force_split)
