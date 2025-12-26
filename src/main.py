@@ -144,8 +144,8 @@ if __name__ == '__main__':
         objectives = parse_vnnlib(spec, input_shape)
         
         # verify
-        timeout = args.timeout - (time.time() - START_TIME)
-        status = verifier.verify(objectives, preconditions=incremental_preconditions, timeout=timeout, force_split=args.force_split)
+        START_TIME = time.time()
+        status = verifier.verify(objectives, preconditions=incremental_preconditions, timeout=args.timeout, force_split=args.force_split)
         runtime = time.time() - START_TIME
 
         # collect new preconditions
