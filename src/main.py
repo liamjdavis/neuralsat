@@ -19,6 +19,7 @@ from setting import Settings
 def _resolve_with_bab(objectives, preconditions, time_limit):
     """ Reverify using BaB with the shortened time limit, used to find UNSAT cores even after SAT is found """
     logger.info(f'[!] Re-solving with BaB for {time_limit} seconds to find UNSAT cores.')
+    logger.debug(f'[DEBUG] time_limit parameter value: {time_limit}, type: {type(time_limit)}')
 
     # Create temp verifier instance
     temp_verifier = Verifier(
@@ -96,7 +97,8 @@ if __name__ == '__main__':
                         help="test on small example with special settings.")
     parser.add_argument('--export_runtime', action='store_true', required=False,
                         help="output runtime.")
-    parser.add_argument('--resolve-time-limit', type=float, default=10, required=False)
+    parser.add_argument('--resolve-time-limit', type=float, default=10, required=False,
+                        help="time limit in seconds for re-solving with BaB to find UNSAT cores after SAT is found (default: 10)")
     
     args = parser.parse_args()
 
@@ -199,7 +201,7 @@ if __name__ == '__main__':
         # if condition is SAT, reverify under time limit
         if status == 'sat':
             # Reverify using BaB with time limit
-
+            logger.debug(f'[DEBUG] Calling _resolve_with_bab with args.resolve_time_limit={args.resolve_time_limit}')
             new_cores = _resolve_with_bab(objectives=objectives, preconditions=incremental_preconditions, time_limit=args.resolve_time_limit)
 
             # Add new cores to preconditions
