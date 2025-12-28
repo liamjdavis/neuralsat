@@ -3,6 +3,7 @@ import torch
 import time
 import os
 
+import gc
 from helper.network.read_onnx import parse_onnx
 from helper.network.read_pth import parse_pth
 
@@ -43,6 +44,13 @@ def _resolve_with_bab(objectives, preconditions, time_limit):
         new_cores.extend(v)
 
     logger.info(f'[!] Re-solving found {len(new_cores)} new UNSAT cores.')
+    
+    # clean up verifier
+    del temp_verifier
+    if 'cuda' in args.device:
+        gc.collect()
+        torch.cuda.empty_cache()
+
     return new_cores
 
 if __name__ == '__main__':
@@ -121,14 +129,6 @@ if __name__ == '__main__':
         print(model)
     logger.info(f'[!] Input shape: {input_shape}')
     logger.info(f'[!] Output shape: {output_shape}')
-    
-    # verifier
-    verifier = Verifier(
-        net=model, 
-        input_shape=input_shape, 
-        batch=args.batch,
-        device=args.device,
-    )
 
     # remove result file if exists
     if args.result_file and os.path.exists(args.result_file):
@@ -142,6 +142,14 @@ if __name__ == '__main__':
         
         # specification
         objectives = parse_vnnlib(spec, input_shape)
+
+        # verifier
+        verifier = Verifier(
+            net=model, 
+            input_shape=input_shape, 
+            batch=args.batch,
+            device=args.device,
+        )
         
         # verify
         START_TIME = time.time()
@@ -181,9 +189,17 @@ if __name__ == '__main__':
         logger.info(f'[!] Result: {status}')
         logger.info(f'[!] Runtime: {runtime:.04f}')
 
+
+        # clean up verifier
+        del verifier
+        if 'cuda' in args.device:
+            gc.collect()
+            torch.cuda.empty_cache()
+
         # if condition is SAT, reverify under time limit
         if status == 'sat':
             # Reverify using BaB with time limit
+
             new_cores = _resolve_with_bab(objectives=objectives, preconditions=incremental_preconditions, time_limit=args.resolve_time_limit)
 
             # Add new cores to preconditions
