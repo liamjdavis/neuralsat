@@ -131,7 +131,7 @@ def _mip_attack(self: verifier.verifier.Verifier, reference_bounds: dict | None)
     
     
 @beartype
-def _preprocess(self: verifier.verifier.Verifier, objectives: typing.Any, force_split: str | None = None) -> tuple:
+def _preprocess(self: verifier.verifier.Verifier, objectives: typing.Any, force_split: str | None = None, resolve_for_cores: bool = False) -> tuple:
     # determine search algorithm
     self.refined_betas = None
     
@@ -156,7 +156,7 @@ def _preprocess(self: verifier.verifier.Verifier, objectives: typing.Any, force_
     if self.input_split: 
         return objectives, None
     
-    if Settings.skip_preprocess:
+    if Settings.skip_preprocess or resolve_for_cores:
         return objectives, None
     
     if (not isinstance(objectives.cs, torch.Tensor)) or (not isinstance(objectives.rhs, torch.Tensor)):

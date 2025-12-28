@@ -29,13 +29,14 @@ def _resolve_with_bab(objectives, preconditions, time_limit):
         device=args.device,
     )
 
-    # Re-solve forcing BaB with time limit
+    # Re-solve forcing BaB with time limit, resolve_for_cores=True skips preprocessing
     status = temp_verifier.verify(
         objectives,
         preconditions=incremental_preconditions,
         timeout=time_limit,
         force_split='hidden',
-        disable_attack=True
+        disable_attack=True,
+        resolve_for_cores=True
     )
 
     # Collect new cores

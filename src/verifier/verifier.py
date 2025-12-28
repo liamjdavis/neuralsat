@@ -67,7 +67,7 @@ class Verifier:
         return objective
     
     @beartype
-    def verify(self: 'Verifier', dnf_objectives: 'DnfObjectives', preconditions: list = [], timeout: int | float = 3600.0, force_split: str | None = None, disable_attack: bool = False) -> str:
+    def verify(self: 'Verifier', dnf_objectives: 'DnfObjectives', preconditions: list = [], timeout: int | float = 3600.0, force_split: str | None = None, disable_attack: bool = False, resolve_for_cores: bool = False) -> str:
         self.start_time = time.time()
         self.total_time = timeout
         self.status = self._verify(
@@ -76,12 +76,13 @@ class Verifier:
             timeout=timeout,
             force_split=force_split,
             disable_attack=disable_attack,
+            resolve_for_cores=resolve_for_cores,
         )
         return self.status
     
     
     @beartype
-    def _verify(self: 'Verifier', dnf_objectives: 'DnfObjectives', preconditions: list, timeout: int | float = 3600.0, force_split: str | None = None, disable_attack: bool = False) -> str:
+    def _verify(self: 'Verifier', dnf_objectives: 'DnfObjectives', preconditions: list, timeout: int | float = 3600.0, force_split: str | None = None, disable_attack: bool = False, resolve_for_cores: bool = False) -> str:
         if not len(dnf_objectives):
             return ReturnStatus.UNSAT
         
@@ -92,7 +93,7 @@ class Verifier:
                 return ReturnStatus.SAT  
 
         # refine
-        dnf_objectives, reference_bounds = self._preprocess(dnf_objectives, force_split=force_split)
+        dnf_objectives, reference_bounds = self._preprocess(dnf_objectives, force_split=force_split, resolve_for_cores=resolve_for_cores)
         
         if os.environ.get('NEURALSAT_DEBUG'):
             print(f'[+] verify _preprocess:', get_used_gpu_memory(), 'MB')
@@ -100,12 +101,18 @@ class Verifier:
         if not len(dnf_objectives):
             return ReturnStatus.UNSAT
         
-        # mip attack
-        is_attacked, self.adv = self._mip_attack(reference_bounds)
-        if is_attacked:
-            return ReturnStatus.SAT 
+        # mip attack (skip when resolving for cores)
+        if not resolve_for_cores and not disable_attack:
+            is_attacked, self.adv = self._mip_attack(reference_bounds)
+            if is_attacked:
+                logger.info(f'[_verify] MIP attack succeeded, returning SAT')
+                return ReturnStatus.SAT
+            logger.debug(f'[_verify] MIP attack did not find counterexample')
+        elif resolve_for_cores:
+            logger.debug(f'[_verify] Skipping MIP attack (resolve_for_cores=True)')
         
-        if self._check_invoke_mip_presolving():
+        # MIP presolving (skip when resolving for cores)
+        if not resolve_for_cores and self._check_invoke_mip_presolving():
             print('[+] Invoking MIP presolving')
             try:
                 mip_verifier = MIPSolver(net=self.net, input_shape=self.input_shape)
@@ -128,7 +135,8 @@ class Verifier:
             preconditions=preconditions,
             timeout=timeout,
             reference_bounds=reference_bounds,
-            max_domain=max_domain
+            max_domain=max_domain,
+            resolve_for_cores=resolve_for_cores
         )
         
         while not status and max_domain > 1:
@@ -138,7 +146,8 @@ class Verifier:
                 preconditions=preconditions,
                 timeout=timeout,
                 reference_bounds=reference_bounds,
-                max_domain=max_domain
+                max_domain=max_domain,
+                resolve_for_cores=resolve_for_cores
             )
             
         return status
@@ -153,7 +162,7 @@ class Verifier:
             
     @beartype    
     def _verify_with_restart(self: 'Verifier', dnf_objectives: 'DnfObjectives', preconditions: list, 
-                             timeout: int | float = 3600.0, reference_bounds: None | dict = None, max_domain: int = 1) -> str | None:
+                             timeout: int | float = 3600.0, reference_bounds: None | dict = None, max_domain: int = 1, resolve_for_cores: bool = False) -> str | None:
         # verify
         while len(dnf_objectives):
             objective = self.get_objective(dnf_objectives, max_domain=max_domain)
@@ -181,7 +190,8 @@ class Verifier:
                             objective=objective, 
                             preconditions=learned_clauses, 
                             reference_bounds=reference_bounds if new_reference_bounds is None else new_reference_bounds,
-                            timeout=timeout
+                            timeout=timeout,
+                            resolve_for_cores=resolve_for_cores
                         )
                     except RuntimeError as exception:
                         if os.environ.get("NEURALSAT_DEBUG"):
@@ -236,14 +246,18 @@ class Verifier:
                 
         
     @beartype
-    def _initialize(self: 'Verifier', objective, preconditions: dict, reference_bounds: dict | None) -> DomainsList | list:
+    def _initialize(self: 'Verifier', objective, preconditions: dict, reference_bounds: dict | None, resolve_for_cores: bool = False) -> DomainsList | list:
         # initialization params
         # TODO: fix init_betas found by MIP
-        ret = self.abstractor.initialize(objective, reference_bounds=reference_bounds)
+        ret = self.abstractor.initialize(objective, reference_bounds=reference_bounds, resolve_for_cores=resolve_for_cores)
 
         # check verified
         assert len(ret.output_lbs) == len(objective.cs)
-        if stop_criterion_batch_any(objective.rhs.to(self.device))(ret.output_lbs.to(self.device)).all():
+        # When resolve_for_cores=True, skip early return to force branching for UNSAT core collection
+        stop_result = stop_criterion_batch_any(objective.rhs.to(self.device))(ret.output_lbs.to(self.device))
+        logger.info(f'[_initialize] resolve_for_cores={resolve_for_cores}, stop_result.all()={stop_result.all()}, len(ret.output_lbs)={len(ret.output_lbs)}')
+        if not resolve_for_cores and stop_result.all():
+            logger.info(f'[_initialize] Returning empty list (all objectives verified by initial bounds)')
             return []
         
         # full slopes uses too much memory
@@ -265,14 +279,15 @@ class Verifier:
             rhs=ret.rhs,
             input_split=self.input_split,
             preconditions=preconditions,
+            resolve_for_cores=resolve_for_cores,
         )
         
         
     @beartype
-    def _verify_one(self: 'Verifier', objective, preconditions: dict, reference_bounds: dict | None, timeout: int | float) -> str:
+    def _verify_one(self: 'Verifier', objective, preconditions: dict, reference_bounds: dict | None, timeout: int | float, resolve_for_cores: bool = False) -> str:
         # initialization
         try:
-            self.domains_list = self._initialize(objective=objective, preconditions=preconditions, reference_bounds=reference_bounds)
+            self.domains_list = self._initialize(objective=objective, preconditions=preconditions, reference_bounds=reference_bounds, resolve_for_cores=resolve_for_cores)
         except RuntimeError as exception:
             if is_cuda_out_of_memory(exception):
                 raise VerifierInitializeError('[_verify_one] OOM exception')
@@ -296,12 +311,22 @@ class Verifier:
         start_time = time.time()
         start_iteration = self.iteration
 
+        logger.info(f'[_verify_one] Starting BaB loop with {len(self.domains_list)} domains, resolve_for_cores={resolve_for_cores}')
+        
+        loop_entered = False
         while len(self.domains_list) > 0:
-            # early stop
-            if self.domains_list.minimum_lowers < Settings.skip_initial_worst_bound:
+            if not loop_entered:
+                loop_entered = True
+                logger.info(f'[_verify_one] BaB loop entered successfully!')
+            
+            # early stop (skip when resolving for cores)
+            if not resolve_for_cores and self.domains_list.minimum_lowers < Settings.skip_initial_worst_bound:
+                logger.info(f'[_verify_one] Early stop: minimum_lowers ({self.domains_list.minimum_lowers}) < skip_initial_worst_bound ({Settings.skip_initial_worst_bound})')
                 return ReturnStatus.EARLY_STOP
             
             # search
+            if self.iteration % 10 == 0 or resolve_for_cores:
+                logger.debug(f'[_verify_one] Iteration {self.iteration}, domains: {len(self.domains_list)}')
             self._parallel_dpll()
                 
             # check adv founded
@@ -321,19 +346,25 @@ class Verifier:
             if self._check_restart(start_time=start_time, start_iteration=start_iteration):
                 return ReturnStatus.RESTART
         
-            # check unsolvable
-            if len(self.domains_list) > Settings.max_domains:
+            # check unsolvable (skip when resolving for cores)
+            if not resolve_for_cores and len(self.domains_list) > Settings.max_domains:
+                logger.debug(f'[_verify_one] Stopping: domains_list length ({len(self.domains_list)}) > max_domains ({Settings.max_domains})')
                 return ReturnStatus.UNKNOWN
             
-            # gpu tightening early stop
-            if self._stop_gpu_tightening():
+            # gpu tightening early stop (skip when resolving for cores)
+            if not resolve_for_cores and self._stop_gpu_tightening():
+                logger.debug(f'[_verify_one] Stopping: GPU tightening early stop')
                 return ReturnStatus.UNKNOWN
             
-            # early stop
-            if self.iteration >= Settings.max_iterations:
+            # early stop (skip when resolving for cores)
+            if not resolve_for_cores and self.iteration >= Settings.max_iterations:
+                logger.debug(f'[_verify_one] Stopping: iteration ({self.iteration}) >= max_iterations ({Settings.max_iterations})')
                 return ReturnStatus.EARLY_STOP
             
+        if not loop_entered:
+            logger.warning(f'[_verify_one] BaB loop never entered! domains_list length was {len(self.domains_list)}')
         
+        logger.info(f'[_verify_one] BaB loop completed. Final iteration: {self.iteration}, status: UNSAT')
         return ReturnStatus.UNSAT
     
     
@@ -404,6 +435,8 @@ class Verifier:
     def _parallel_dpll(self: 'Verifier') -> None:
         iter_start = time.time()
         
+        logger.debug(f'[_parallel_dpll] Starting iteration {self.iteration + 1}, domains: {len(self.domains_list)}, batch: {self.batch}')
+        
         # step 1: MIP attack
         if Settings.use_mip_attack:
             self.mip_attacker.attack_domains(self.domains_list.pick_out_worst_domains(1001, 'cpu'))
@@ -460,7 +493,10 @@ class Verifier:
 
         # step 8: pruning unverified branches
         tic = time.time()
+        domains_before = len(self.domains_list)
         self.domains_list.add(abstraction_ret, decisions)
+        domains_after = len(self.domains_list)
+        logger.debug(f'[_parallel_dpll] Added subproblems: {domains_before} -> {domains_after} (diff: {domains_after - domains_before})')
         add_time = time.time() - tic
 
         # statistics

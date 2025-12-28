@@ -220,7 +220,7 @@ class NetworkAbstractor:
         
 
     @beartype
-    def initialize(self: 'NetworkAbstractor', objective: typing.Any, reference_bounds: dict | None = None, short_cut: bool = False) -> AbstractResults:
+    def initialize(self: 'NetworkAbstractor', objective: typing.Any, reference_bounds: dict | None = None, short_cut: bool = False, resolve_for_cores: bool = False) -> AbstractResults:
         objective.cs = objective.cs.to(self.device)
         objective.rhs = objective.rhs.to(self.device)
         
@@ -299,21 +299,25 @@ class NetworkAbstractor:
             
         logger.info(f'Initial bounds (first 10): {lb_init.detach().cpu().flatten()[:10]}')
         
-        if stop_criterion_func(lb_init).all().item():
+        if not resolve_for_cores and stop_criterion_func(lb_init).all().item():
             return AbstractResults(**{'output_lbs': lb_init})
 
-        # self.update_refined_beta(init_betas, batch=len(objective.cs))
-        lb, _ = self.net.compute_bounds(
-            x=(x,), 
-            C=objective.cs, 
-            method='crown-optimized',
-            aux_reference_bounds=aux_reference_bounds, 
-            reference_bounds=reference_bounds,
-            bound_upper=False,
-        )
-        logger.info(f'Initial optimized bounds (first 10): {lb.detach().cpu().flatten()[:10]}')
-        if stop_criterion_func(lb).all().item():
-            return AbstractResults(**{'output_lbs': lb})
+        # Skip optimization when resolve_for_cores=True to force raw BaB
+        if resolve_for_cores:
+            lb = lb_init
+        else:
+            # self.update_refined_beta(init_betas, batch=len(objective.cs))
+            lb, _ = self.net.compute_bounds(
+                x=(x,), 
+                C=objective.cs, 
+                method='crown-optimized',
+                aux_reference_bounds=aux_reference_bounds, 
+                reference_bounds=reference_bounds,
+                bound_upper=False,
+            )
+            logger.info(f'Initial optimized bounds (first 10): {lb.detach().cpu().flatten()[:10]}')
+            if stop_criterion_func(lb).all().item():
+                return AbstractResults(**{'output_lbs': lb})
         
         # reorganize tensors
         with torch.no_grad():

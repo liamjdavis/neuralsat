@@ -38,7 +38,8 @@ class DomainsList:
                  cs: torch.Tensor, 
                  rhs: torch.Tensor, 
                  input_split: bool = False, 
-                 preconditions: dict = {}) -> None:
+                 preconditions: dict = {},
+                 resolve_for_cores: bool = False) -> None:
 
         self.net = net
         self.final_name = self.net.final_node_name
@@ -53,7 +54,12 @@ class DomainsList:
         self.global_unsat_cores = []  # List[List[int]] - SAT clauses learned from all properties
         
         # unverified indices 
-        remain_idx = torch.where((output_lbs.detach().cpu() <= rhs.detach().cpu()).all(1))[0]
+        if resolve_for_cores:
+            # When resolving for cores, keep all objectives even if already verified
+            remain_idx = torch.arange(len(output_lbs))
+            logger.info(f'[resolve_for_cores=True] Keeping all {len(remain_idx)} objectives for UNSAT core collection')
+        else:
+            remain_idx = torch.where((output_lbs.detach().cpu() <= rhs.detach().cpu()).all(1))[0]
         
         # decisions
         all_histories = [_copy_history(histories) for _ in range(len(cs))] if not input_split else None
