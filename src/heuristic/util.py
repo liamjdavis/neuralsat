@@ -229,7 +229,7 @@ def init_sat_solver(self: 'heuristic.domains_list.DomainsList', objective_ids: t
             self.all_sat_solvers.append(new_sat_solver)    
             new_remain_idx.append(batch_id)
                     
-    return torch.tensor(new_remain_idx)
+    return torch.tensor(new_remain_idx, dtype=torch.long)
     
     
 @beartype

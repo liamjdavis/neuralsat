@@ -150,7 +150,7 @@ class Verifier:
                 resolve_for_cores=resolve_for_cores
             )
             
-        return status
+        return status if status else ReturnStatus.UNKNOWN
         
     def _heuristic_configure(self: 'Verifier', timeout: int | float) -> None:
         if timeout <= 30:
@@ -210,7 +210,7 @@ class Verifier:
                         else:
                             logger.debug('[!] RuntimeError exception')
                             traceback.print_exc()
-                            return None
+                            return ReturnStatus.UNKNOWN
                     except SystemExit:
                         exit()
                     except:
