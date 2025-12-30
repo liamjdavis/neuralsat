@@ -199,6 +199,29 @@ if __name__ == '__main__':
             gc.collect()
             torch.cuda.empty_cache()
 
+        # if condition is UNSAT, all subsequent properties are also UNSAT
+        if status == 'unsat':
+            logger.info(f'[!] Property {i+1}/{len(specs)} is UNSAT. All remaining properties are also UNSAT.')
+            
+            # Mark all remaining properties as UNSAT
+            for j in range(i + 1, len(specs)):
+                logger.info(f'[!] Verifying spec: {specs[j]}')
+                logger.info(f'[!] Property is UNSAT due to previous property {i+1} being UNSAT (incremental verification).')
+                logger.info(f'[!] Result: unsat')
+                logger.info(f'[!] Runtime: 0.0000')
+                
+                if args.result_file:
+                    with open(args.result_file, 'a') as fp:
+                        if args.export_runtime:
+                            print(f'unsat,0.0000', file=fp)
+                        else:
+                            print('unsat', file=fp)
+                
+                print(f'unsat,0.0000')
+            
+            # Exit the loop since all remaining properties are UNSAT
+            break
+
         # if condition is SAT, reverify under time limit
         if status == 'sat':
             # Reverify using BaB with time limit
