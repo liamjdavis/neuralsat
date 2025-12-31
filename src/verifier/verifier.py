@@ -24,7 +24,7 @@ from helper.misc.torch_cuda_memory import is_cuda_out_of_memory, gc_cuda
 from helper.misc.error import VerifierInitializeError
 from helper.network.onnx2pytorch import ConvertModel
 from helper.spec.objective import DnfObjectives
-from helper.misc.result import ReturnStatus
+from helper.misc.result import ReturnStatus, AbstractResults
 from helper.misc.logger import logger
 
 from setting import Settings
@@ -56,6 +56,10 @@ class Verifier:
         # stats
         self.all_conflict_clauses = {}
         self.visited = 0
+        
+        # split impact statistics for precondition minimization
+        # Maps (layer_name, neuron_id) -> {'fixes': int, 'potential_fixes': int, 'impact': float}
+        self.split_impact_stats = {}
         
         # other verifier
         self.other = copy.deepcopy(self)
@@ -432,6 +436,150 @@ class Verifier:
             
             
     @beartype
+    def _collect_split_impact_stats(self: 'Verifier', pruned_ret: AbstractResults, decisions: list | torch.Tensor) -> None:
+        """Initialize tracking for split impact statistics.
+        
+        For each split decision, we track:
+        - The split neuron (layer_name, neuron_id)
+        - Masks before the split (to compare later)
+        """
+        if not hasattr(self, 'split_impact_stats'):
+            self.split_impact_stats = {}
+        
+        if isinstance(decisions, torch.Tensor):
+            # Input splitting - skip for now
+            return
+        
+        # Get layer ordering for potential fixes calculation
+        if not hasattr(self.abstractor, 'net') or not hasattr(self.abstractor.net, 'split_nodes'):
+            return
+        
+        split_node_names = [layer.name for layer in self.abstractor.net.split_nodes]
+        layer_to_index = {name: idx for idx, name in enumerate(split_node_names)}
+        
+        # Process each decision
+        for decision in decisions:
+            if not isinstance(decision, list) or len(decision) < 2:
+                continue
+            
+            layer_name, neuron_id = decision[0], decision[1]
+            split_key = (layer_name, neuron_id)
+            
+            # Initialize stats for this split if not already present
+            if split_key not in self.split_impact_stats:
+                self.split_impact_stats[split_key] = {
+                    'fixes': 0,
+                    'potential_fixes': 0,
+                    'impact': 0.0,
+                    'pre_masks': None,  # Store masks before split for comparison
+                }
+            
+            # Store pre-split masks for all layers
+            if self.split_impact_stats[split_key]['pre_masks'] is None:
+                self.split_impact_stats[split_key]['pre_masks'] = {}
+            
+            # Store unstable neuron counts for all layers before split
+            # We store the total unstable count (not averaged) for potential fixes calculation
+            for lname in pruned_ret.masks.keys():
+                if lname not in self.split_impact_stats[split_key]['pre_masks']:
+                    # Count unstable neurons (True in mask means unstable)
+                    # masks shape: (batch, neurons)
+                    unstable_count = pruned_ret.masks[lname].sum().item()
+                    self.split_impact_stats[split_key]['pre_masks'][lname] = unstable_count
+    
+    @beartype
+    def _update_split_impact_stats(self: 'Verifier', pruned_ret: AbstractResults, 
+                                   abstraction_ret: AbstractResults, decisions: list | torch.Tensor) -> None:
+        """Update split impact statistics after abstraction.
+        
+        For each split, calculate:
+        - Newly fixed neurons (were unstable before, now fixed)
+        - Potential fixes (unfixed neurons in layers after the split neuron)
+        - Impact metric (fixes / potential_fixes)
+        """
+        if isinstance(decisions, torch.Tensor):
+            # Input splitting - skip for now
+            return
+        
+        # Get layer ordering
+        if not hasattr(self.abstractor, 'net') or not hasattr(self.abstractor.net, 'split_nodes'):
+            return
+        
+        split_node_names = [layer.name for layer in self.abstractor.net.split_nodes]
+        layer_to_index = {name: idx for idx, name in enumerate(split_node_names)}
+        
+        # Process each decision
+        for decision in decisions:
+            if not isinstance(decision, list) or len(decision) < 2:
+                continue
+            
+            layer_name, neuron_id = decision[0], decision[1]
+            split_key = (layer_name, neuron_id)
+            
+            if split_key not in self.split_impact_stats:
+                continue
+            
+            stats = self.split_impact_stats[split_key]
+            if stats['pre_masks'] is None:
+                continue
+            
+            # Calculate newly fixed neurons
+            # Note: After splitting, we create 2 domains (active/inactive branches)
+            # We compare total unstable count before vs after
+            newly_fixed = 0
+            for lname in pruned_ret.masks.keys():
+                if lname not in stats['pre_masks']:
+                    continue
+                
+                # Count unstable before (total across batch)
+                unstable_before = stats['pre_masks'][lname]
+                
+                # Count unstable after (total across new domains)
+                if lname in abstraction_ret.masks:
+                    # abstraction_ret.masks has shape (batch, neurons) where True = unstable
+                    unstable_after = abstraction_ret.masks[lname].sum().item()
+                    
+                    # Newly fixed = unstable_before - unstable_after
+                    # This represents neurons that became fixed as a result of this split
+                    fixed_in_layer = max(0, unstable_before - unstable_after)
+                    newly_fixed += fixed_in_layer
+            
+            # Calculate potential fixes (unfixed neurons in layers after split neuron)
+            split_layer_idx = layer_to_index.get(layer_name, -1)
+            if split_layer_idx == -1:
+                continue
+            
+            potential_fixes = 0
+            for lname, lidx in layer_to_index.items():
+                # Only count layers after the split layer
+                if lidx > split_layer_idx:
+                    if lname in stats['pre_masks']:
+                        # Count unstable neurons in this layer (before split)
+                        # This is the total count of unfixed neurons that "could have" been fixed
+                        unstable_count = stats['pre_masks'][lname]
+                        potential_fixes += unstable_count
+            
+            # Add 1 to avoid division by zero for last layer
+            potential_fixes += 1
+            
+            # Update statistics (accumulate fixes across multiple splits of same neuron)
+            stats['fixes'] += newly_fixed
+            # potential_fixes is based on the network structure, so it's the same each time
+            # but we update it in case the network structure changes
+            stats['potential_fixes'] = potential_fixes
+            if potential_fixes > 0:
+                stats['impact'] = stats['fixes'] / potential_fixes
+            else:
+                stats['impact'] = 0.0
+            
+            # Clear pre_masks to save memory (we've processed them)
+            stats['pre_masks'] = None
+            
+            logger.debug(f'[Split Impact] Neuron ({layer_name}, {neuron_id}): '
+                        f'fixes={newly_fixed}, potential={potential_fixes}, '
+                        f'total_fixes={stats["fixes"]}, impact={stats["impact"]:.4f}')
+    
+    @beartype
     def _parallel_dpll(self: 'Verifier') -> None:
         iter_start = time.time()
         
@@ -486,10 +634,18 @@ class Verifier:
         decisions = self.decision(self.abstractor, pruned_ret)
         decision_time = time.time() - tic
         
+        # Collect split impact statistics (only for hidden splits)
+        if not self.input_split and pruned_ret.masks is not None:
+            self._collect_split_impact_stats(pruned_ret, decisions)
+        
         # step 7: abstraction 
         tic = time.time()
         abstraction_ret = self.abstractor.forward(decisions, pruned_ret)
         abstraction_time = time.time() - tic
+        
+        # Update split impact statistics with post-abstraction masks
+        if not self.input_split and pruned_ret.masks is not None and abstraction_ret.masks is not None:
+            self._update_split_impact_stats(pruned_ret, abstraction_ret, decisions)
 
         # step 8: pruning unverified branches
         tic = time.time()

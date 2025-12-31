@@ -55,6 +55,131 @@ def _resolve_with_bab(objectives, preconditions, time_limit):
 
     return new_cores
 
+def _minimize_core(objectives, condition, time_limit, split_impact_stats=None, removal_threshold=0.2):
+    """ Minimize the UNSAT core by removing literals and checking if still UNSAT """  
+    if split_impact_stats is None or len(split_impact_stats) == 0:
+        logger.info(f'[!] No split_impact_stats available, skipping minimization')
+        return None
+    
+    # Create temp verifier instance
+    temp_verifier = Verifier(
+        net=model,
+        input_shape=input_shape,
+        batch=args.batch,
+        device=args.device,
+    )
+    
+    # Initialize domains_list by doing a minimal verify call to set up var_mapping
+    try:
+        # Initialize by doing a minimal verify - this will set up domains_list
+        _ = temp_verifier.verify(
+            objectives,
+            preconditions=[],
+            timeout=0.1,
+            disable_attack=True,
+            resolve_for_cores=True
+        )
+    except:
+        pass
+    
+    # Get reversed_var_mapping to map literals to (layer_name, neuron_id)
+    if not hasattr(temp_verifier, 'domains_list') or temp_verifier.domains_list is None:
+        logger.warning(f'[!] Could not initialize domains_list for var_mapping, skipping minimization')
+        del temp_verifier
+        if 'cuda' in args.device:
+            gc.collect()
+            torch.cuda.empty_cache()
+        return None
+    
+    reversed_var_mapping = temp_verifier.domains_list.reversed_var_mapping
+    
+    minimized_core = []
+    dropped_literals = []
+    
+    # determine literals to drop based on impact statistics
+    for literal in condition:
+        # Map literal to (layer_name, neuron_id)
+        abs_literal = abs(literal)
+        if abs_literal not in reversed_var_mapping:
+            # Literal not in mapping, keep it to be safe
+            logger.debug(f'[DEBUG] Literal {literal} not found in var_mapping, keeping it')
+            minimized_core.append(literal)
+            continue
+        
+        layer_name, neuron_id = reversed_var_mapping[abs_literal]
+        split_key = (layer_name, neuron_id)
+        
+        # Look up impact stats
+        if split_key not in split_impact_stats:
+            # No stats for this split, keep the literal
+            logger.debug(f'[DEBUG] No impact stats for ({layer_name}, {neuron_id}), keeping literal {literal}')
+            minimized_core.append(literal)
+            continue
+        
+        stats = split_impact_stats[split_key]
+        fixes = stats.get('fixes', 0)
+        potential_fixes = stats.get('potential_fixes', 1)
+        
+        # Calculate fixes over potential fixes ratio
+        if potential_fixes > 0:
+            ratio = fixes / potential_fixes
+        else:
+            ratio = 0.0
+        
+        # Log the fixes over potential fixes
+        logger.info(f'[MINIMIZE] Literal {literal} -> ({layer_name}, {neuron_id}): fixes={fixes}, potential_fixes={potential_fixes}, ratio={ratio:.4f}')
+        
+        # if the fixes over potential fixes is under removal_threshold
+        if ratio < removal_threshold:
+            # don't add the literal
+            dropped_literals.append((literal, layer_name, neuron_id, ratio))
+            logger.debug(f'[MINIMIZE] Dropping literal {literal} (ratio {ratio:.4f} < threshold {removal_threshold})')
+        else:
+            # otherwise add the literal
+            minimized_core.append(literal)
+            logger.debug(f'[MINIMIZE] Keeping literal {literal} (ratio {ratio:.4f} >= threshold {removal_threshold})')
+    
+    # print the minimized core vs original core
+    logger.info(f'[MINIMIZE] Original core size: {len(condition)}, Minimized core size: {len(minimized_core)}, Dropped: {len(dropped_literals)}')
+    
+    if len(minimized_core) == 0:
+        logger.warning(f'[MINIMIZE] All literals dropped, keeping original core')
+        minimized_core = condition.copy()
+    
+    if len(minimized_core) >= len(condition):
+        # No improvement, return None
+        logger.info(f'[MINIMIZE] No improvement (minimized >= original), returning None')
+        del temp_verifier
+        if 'cuda' in args.device:
+            gc.collect()
+            torch.cuda.empty_cache()
+        return None
+    
+    # fix cores in condition minus dropped literals
+    status = temp_verifier.verify(
+        objectives,
+        preconditions=[minimized_core],
+        timeout=time_limit,
+        disable_attack=True,
+        resolve_for_cores=True
+    )
+    
+    # if still UNSAT, return minimized core, else return None
+    if status == 'unsat':
+        logger.info(f'[MINIMIZE] Minimized core is still UNSAT, returning minimized core')
+        del temp_verifier
+        if 'cuda' in args.device:
+            gc.collect()
+            torch.cuda.empty_cache()
+        return minimized_core
+    else:
+        logger.info(f'[MINIMIZE] Minimized core is {status}, returning None (minimization failed)')
+        del temp_verifier
+        if 'cuda' in args.device:
+            gc.collect()
+            torch.cuda.empty_cache()
+        return None
+
 if __name__ == '__main__':
     START_TIME = time.time()
 
@@ -166,6 +291,20 @@ if __name__ == '__main__':
         incremental_preconditions.extend(new_preconditions)
         verifier.all_conflict_clauses = {} # clear for next run
         logger.info(f'[!] Transferred {len(new_preconditions)} UNSAT cores')
+
+        # minimize preconditions
+        if len(incremental_preconditions) > 0:
+            # get shortest conflict clauses 
+            incremental_preconditions.sort(key=lambda x: len(x), reverse=False)
+
+            # minimize three shortest conflict clauses 
+            for condition in incremental_preconditions[:3]:
+                minimized_core = _minimize_core(objectives, condition, 10, split_impact_stats=verifier.split_impact_stats)
+
+                if minimized_core is not None:
+                    incremental_preconditions.remove(condition)
+                    incremental_preconditions.append(minimized_core)
+                    logger.info(f'[!] Minimized a core from size {len(condition)} to size {len(minimized_core)}')
         
         # output
         logger.info(f'[!] Iterations: {verifier.iteration}')
