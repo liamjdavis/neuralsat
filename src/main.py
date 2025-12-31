@@ -223,7 +223,7 @@ if __name__ == '__main__':
             break
 
         # if condition is SAT, reverify under time limit
-        if status == 'sat':
+        if status == 'sat' and args.resolve_time_limit > 0:
             # Reverify using BaB with time limit
             logger.debug(f'[DEBUG] Calling _resolve_with_bab with args.resolve_time_limit={args.resolve_time_limit}')
             new_cores = _resolve_with_bab(objectives=objectives, preconditions=incremental_preconditions, time_limit=args.resolve_time_limit)
