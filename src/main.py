@@ -76,8 +76,7 @@ def _minimize_core(objectives, condition, time_limit, split_impact_stats=None, r
             objectives,
             preconditions=[],
             timeout=0.1,
-            disable_attack=True,
-            resolve_for_cores=True
+            disable_attack=True
         )
     except:
         pass
@@ -160,8 +159,7 @@ def _minimize_core(objectives, condition, time_limit, split_impact_stats=None, r
         objectives,
         preconditions=[minimized_core],
         timeout=time_limit,
-        disable_attack=True,
-        resolve_for_cores=True
+        disable_attack=True
     )
     
     # if still UNSAT, return minimized core, else return None
