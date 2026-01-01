@@ -162,7 +162,7 @@ def _minimize_core(objectives, condition, time_limit, split_impact_stats=None, r
         logger.warning(f'[MINIMIZE] All literals dropped, choosing random literals to keep')
         # randomly drop random_drop_percentage of literals from original cores
         num_to_drop = int(len(conflict_clause) * random_drop_percentage)
-        drop_indices = set(random..sample(range(len(conflict_clause)), num_to_drop))
+        drop_indices = set(random.sample(range(len(conflict_clause)), num_to_drop))
         minimized_core = [lit for i, lit in enumerate(conflict_clause) if i not in drop_indices]
     
     if len(minimized_core) >= len(conflict_clause):
