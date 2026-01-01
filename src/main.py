@@ -90,13 +90,27 @@ def _minimize_core(objectives, condition, time_limit, split_impact_stats=None, r
             torch.cuda.empty_cache()
         return None
     
+    # Convert condition to conflict clause if it's a history dict
+    if isinstance(condition, dict):
+        from heuristic.util import _history_to_conflict_clause
+        conflict_clause = _history_to_conflict_clause(condition, temp_verifier.domains_list.var_mapping)
+        if len(conflict_clause) == 0:
+            logger.warning(f'[!] Could not convert history to conflict clause, skipping minimization')
+            del temp_verifier
+            if 'cuda' in args.device:
+                gc.collect()
+                torch.cuda.empty_cache()
+            return None
+    else:
+        conflict_clause = condition
+    
     reversed_var_mapping = temp_verifier.domains_list.reversed_var_mapping
     
     minimized_core = []
     dropped_literals = []
     
     # determine literals to drop based on impact statistics
-    for literal in condition:
+    for literal in conflict_clause:
         # Map literal to (layer_name, neuron_id)
         abs_literal = abs(literal)
         if abs_literal not in reversed_var_mapping:
@@ -139,13 +153,13 @@ def _minimize_core(objectives, condition, time_limit, split_impact_stats=None, r
             logger.debug(f'[MINIMIZE] Keeping literal {literal} (ratio {ratio:.4f} >= threshold {removal_threshold})')
     
     # print the minimized core vs original core
-    logger.info(f'[MINIMIZE] Original core size: {len(condition)}, Minimized core size: {len(minimized_core)}, Dropped: {len(dropped_literals)}')
+    logger.info(f'[MINIMIZE] Original core size: {len(conflict_clause)}, Minimized core size: {len(minimized_core)}, Dropped: {len(dropped_literals)}')
     
     if len(minimized_core) == 0:
         logger.warning(f'[MINIMIZE] All literals dropped, keeping original core')
-        minimized_core = condition.copy()
+        minimized_core = conflict_clause.copy()
     
-    if len(minimized_core) >= len(condition):
+    if len(minimized_core) >= len(conflict_clause):
         # No improvement, return None
         logger.info(f'[MINIMIZE] No improvement (minimized >= original), returning None')
         del temp_verifier
@@ -285,7 +299,18 @@ if __name__ == '__main__':
         # collect new preconditions
         new_preconditions = []
         for v in verifier.all_conflict_clauses.values():
-            new_preconditions.extend(v)
+            # Convert histories to conflict clauses if needed
+            from heuristic.util import _history_to_conflict_clause
+            for history in v:
+                if isinstance(history, dict):
+                    # History dict needs to be converted to conflict clause
+                    if hasattr(verifier, 'domains_list') and hasattr(verifier.domains_list, 'var_mapping'):
+                        clause = _history_to_conflict_clause(history, verifier.domains_list.var_mapping)
+                        if len(clause) > 0:
+                            new_preconditions.append(clause)
+                else:
+                    # Already a conflict clause
+                    new_preconditions.append(history)
         incremental_preconditions.extend(new_preconditions)
         verifier.all_conflict_clauses = {} # clear for next run
         logger.info(f'[!] Transferred {len(new_preconditions)} UNSAT cores')
