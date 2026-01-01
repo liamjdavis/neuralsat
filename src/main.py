@@ -58,7 +58,7 @@ def _resolve_with_bab(objectives, preconditions, time_limit):
 
     return new_cores
 
-def _minimize_core(objectives, condition, time_limit, split_impact_stats=None, removal_threshold=0.2, random_drop_percentage=0.5):
+def _minimize_core(objectives, condition, time_limit=100, split_impact_stats=None, removal_threshold=0.2, random_drop_percentage=0.5):
     """ Minimize the UNSAT core by removing literals and checking if still UNSAT """  
     if split_impact_stats is None or len(split_impact_stats) == 0:
         logger.info(f'[!] No split_impact_stats available, skipping minimization')
@@ -386,7 +386,7 @@ if __name__ == '__main__':
 
             # minimize three shortest conflict clauses 
             for condition in incremental_preconditions[:3]:
-                minimized_core = _minimize_core(objectives, condition, 10, split_impact_stats=verifier.split_impact_stats)
+                minimized_core = _minimize_core(objectives, condition, split_impact_stats=verifier.split_impact_stats)
 
                 if minimized_core is not None:
                     incremental_preconditions.remove(condition)
