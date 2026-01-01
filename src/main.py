@@ -2,6 +2,7 @@ import argparse
 import torch
 import time
 import os
+import random
 
 import gc
 from helper.network.read_onnx import parse_onnx
@@ -57,7 +58,7 @@ def _resolve_with_bab(objectives, preconditions, time_limit):
 
     return new_cores
 
-def _minimize_core(objectives, condition, time_limit, split_impact_stats=None, removal_threshold=0.2):
+def _minimize_core(objectives, condition, time_limit, split_impact_stats=None, removal_threshold=0.2, random_drop_percentage=0.5):
     """ Minimize the UNSAT core by removing literals and checking if still UNSAT """  
     if split_impact_stats is None or len(split_impact_stats) == 0:
         logger.info(f'[!] No split_impact_stats available, skipping minimization')
@@ -158,8 +159,11 @@ def _minimize_core(objectives, condition, time_limit, split_impact_stats=None, r
     logger.info(f'[MINIMIZE] Original core size: {len(conflict_clause)}, Minimized core size: {len(minimized_core)}, Dropped: {len(dropped_literals)}')
     
     if len(minimized_core) == 0:
-        logger.warning(f'[MINIMIZE] All literals dropped, keeping original core')
-        minimized_core = conflict_clause.copy()
+        logger.warning(f'[MINIMIZE] All literals dropped, choosing random literals to keep')
+        # randomly drop random_drop_percentage of literals from original cores
+        num_to_drop = int(len(conflict_clause) * random_drop_percentage)
+        drop_indices = set(random..sample(range(len(conflict_clause)), num_to_drop))
+        minimized_core = [lit for i, lit in enumerate(conflict_clause) if i not in drop_indices]
     
     if len(minimized_core) >= len(conflict_clause):
         # No improvement, return None
@@ -181,6 +185,9 @@ def _minimize_core(objectives, condition, time_limit, split_impact_stats=None, r
     # if still UNSAT, return minimized core, else return None
     if status == 'unsat':
         logger.info(f'[MINIMIZE] Minimized core is still UNSAT, returning minimized core')
+
+        # print minimized core
+        logger.debug(f'[MINIMIZE] Minimized core literals: {minimized_core}')
         del temp_verifier
         if 'cuda' in args.device:
             gc.collect()
