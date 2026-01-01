@@ -45,9 +45,17 @@ def _resolve_with_bab(objectives, preconditions, time_limit):
     # Collect new cores
     new_cores = []
 
-    for v in temp_verifier.all_conflict_clauses.values():
-        new_cores.extend(v)
-
+    if hasattr(temp_verifier, 'domains_list') and hasattr(temp_verifier.domains_list, 'var_mapping'):
+        from heuristic.util import _history_to_conflict_clause
+        for v in temp_verifier.all_conflict_clauses.values():
+            for history in v:
+                if isinstance(history, dict):
+                    clause = _history_to_conflict_clause(history, temp_verifier.domains_list.var_mapping)
+                    if len(clause) > 0:
+                        new_cores.append(clause)
+                else:
+                    new_cores.append(history)
+    
     logger.info(f'[!] Re-solving found {len(new_cores)} new UNSAT cores.')
     
     # clean up verifier
@@ -133,8 +141,30 @@ def _minimize_core(objectives, condition, time_limit=100, split_impact_stats=Non
             continue
         
         stats = split_impact_stats[split_key]
-        fixes = stats.get('fixes', 0)
-        potential_fixes = stats.get('potential_fixes', 1)
+        
+        # Determine direction based on literal sign
+        # positive literal -> active branch (x > 0)
+        # negative literal -> inactive branch (x <= 0)
+        # However, the core contains negated literals of the decision path.
+        # If the decision was x > 0 (active), the core has -x (negative).
+        # If the decision was x <= 0 (inactive), the core has +x (positive).
+        
+        # So:
+        # literal < 0 means decision was active branch
+        # literal > 0 means decision was inactive branch
+        
+        direction_stats = None
+        if 'active' in stats and 'inactive' in stats:
+            if literal < 0:
+                direction_stats = stats['active']
+            else:
+                direction_stats = stats['inactive']
+        else:
+            # Fallback for old stats format or if direction not available
+            direction_stats = stats
+            
+        fixes = direction_stats.get('fixes', 0)
+        potential_fixes = direction_stats.get('potential_fixes', 1)
         
         # Calculate fixes over potential fixes ratio
         if potential_fixes > 0:
@@ -143,7 +173,8 @@ def _minimize_core(objectives, condition, time_limit=100, split_impact_stats=Non
             ratio = 0.0
         
         # Log the fixes over potential fixes
-        logger.info(f'[MINIMIZE] Literal {literal} -> ({layer_name}, {neuron_id}): fixes={fixes}, potential_fixes={potential_fixes}, ratio={ratio:.4f}')
+        branch_name = "active" if literal < 0 else "inactive"
+        logger.info(f'[MINIMIZE] Literal {literal} ({branch_name}) -> ({layer_name}, {neuron_id}): fixes={fixes}, potential_fixes={potential_fixes}, ratio={ratio:.4f}')
         
         # if the fixes over potential fixes is under removal_threshold
         if ratio < removal_threshold:
@@ -175,9 +206,12 @@ def _minimize_core(objectives, condition, time_limit=100, split_impact_stats=Non
         return None
     
     # fix cores in condition minus dropped literals
+    # We want to check if the subset of history (negated literals in core) is UNSAT.
+    # So we enforce the history decisions (negation of core literals) as unit clauses.
+    core_constraints = [[-lit] for lit in minimized_core]
     status = temp_verifier.verify(
         objectives,
-        preconditions=[minimized_core],
+        preconditions=core_constraints,
         timeout=time_limit,
         disable_attack=True
     )

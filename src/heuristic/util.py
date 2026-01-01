@@ -191,7 +191,19 @@ def init_sat_solver(self: 'heuristic.domains_list.DomainsList', objective_ids: t
                     lower_bounds: dict, upper_bounds: dict, histories: list, preconditions: dict) -> torch.Tensor:
     assert torch.equal(objective_ids, torch.unique(objective_ids))
     # initial learned conflict clauses
-    clauses_per_objective = {k: [_history_to_conflict_clause(c, self.var_mapping) for c in v] for k, v in preconditions.items()}
+    clauses_per_objective = {}
+    for k, v in preconditions.items():
+        clauses = []
+        for c in v:
+            if isinstance(c, dict):
+                # Convert history dict to clause
+                clauses.append(_history_to_conflict_clause(c, self.var_mapping))
+            elif isinstance(c, list):
+                # Already a clause
+                clauses.append(c)
+            else:
+                logger.warning(f"[init_sat_solver] Unknown precondition type: {type(c)}")
+        clauses_per_objective[k] = clauses
     # pprint(clauses_per_objective)
     
     # masks: 1 for active, -1 for inactive, 0 for unstable

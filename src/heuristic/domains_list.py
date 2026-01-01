@@ -53,6 +53,26 @@ class DomainsList:
         # Initialized empty; populated by save_conflict_clauses when domains prove UNSAT
         self.global_unsat_cores = []  # List[List[int]] - SAT clauses learned from all properties
         
+        # Populate global_unsat_cores with initial preconditions
+        if len(preconditions) > 0:
+            # preconditions is {obj_id: [clauses/histories]}
+            # We iterate over the first objective's preconditions since they are duplicated across all objectives
+            first_key = next(iter(preconditions))
+            
+            # Helper to convert histories to clauses if needed
+            from heuristic.util import _history_to_conflict_clause
+            
+            for cond in preconditions[first_key]:
+                if isinstance(cond, list):
+                    # Already a clause
+                    self.global_unsat_cores.append(cond)
+                elif isinstance(cond, dict):
+                    # Convert history dict to clause
+                    # Note: We need var_mapping, which is a property that computes on demand
+                    clause = _history_to_conflict_clause(cond, self.var_mapping)
+                    if len(clause) > 0:
+                        self.global_unsat_cores.append(clause)
+        
         # unverified indices 
         if resolve_for_cores:
             # When resolving for cores, keep all objectives even if already verified
