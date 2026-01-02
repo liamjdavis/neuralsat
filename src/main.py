@@ -17,8 +17,6 @@ from verifier.verifier import Verifier
 
 from setting import Settings
 
-from heuristic.sat_solver import SATSolver
-
 def _resolve_with_bab(objectives, preconditions, time_limit):
     """ Reverify using BaB with the shortened time limit, used to find UNSAT cores even after SAT is found """
     logger.info(f'[!] Re-solving with BaB for {time_limit} seconds to find UNSAT cores.')
@@ -235,55 +233,6 @@ def _minimize_core(objectives, condition, time_limit=100, split_impact_stats=Non
             torch.cuda.empty_cache()
         return None
 
-def _unit_propagate_cores(cores):
-    """
-    Apply unit propagation across all cores using the built-in SAT solver.
-    
-    Returns:
-        tuple: (is_unsat, simplified_cores)
-        - is_unsat: True if UNSAT is detected (conflicting unit cores or empty clause)
-        - simplified_cores: List of simplified cores after unit propagation
-    """
-    if len(cores) == 0:
-        return False, cores
-    
-    logger.info(f'[UNIT-PROP] Starting unit propagation on {len(cores)} cores')
-    
-    # Create SAT solver with all cores
-    sat_solver = SATSolver(cores)
-    
-    # Perform BCP (Boolean Constraint Propagation / unit propagation)
-    success, inferred_literals = sat_solver.bcp()
-    
-    if not success:
-        # Conflict detected during BCP - this means UNSAT
-        logger.info(f'[UNIT-PROP] CONFLICT detected during unit propagation! Problem is UNSAT.')
-        return True, []
-    
-    if len(inferred_literals) > 0:
-        logger.info(f'[UNIT-PROP] Inferred {len(inferred_literals)} unit literals: {inferred_literals[:10]}{"..." if len(inferred_literals) > 10 else ""}')
-    
-    # Check if we have an empty clause (all remaining clauses are satisfied)
-    if len(sat_solver.clauses) == 0:
-        logger.info(f'[UNIT-PROP] All clauses satisfied - this is actually SAT, not UNSAT')
-        return False, []
-    
-    # Check for empty clauses (clauses where all literals were removed)
-    empty_clause_mask = sat_solver.clauses.count_nonzero(dim=1) == 0
-    if empty_clause_mask.any():
-        logger.info(f'[UNIT-PROP] EMPTY CLAUSE detected! Problem is UNSAT.')
-        return True, []
-    
-    # Use get_clauses to retrieve simplified cores including unit cores
-    simplified_cores = sat_solver.get_clauses()
-    
-    if len(inferred_literals) > 0:
-        logger.info(f'[UNIT-PROP] Simplified cores: {len(cores)} -> {len(simplified_cores)}')
-        total_literals_before = sum(len(c) for c in cores)
-        total_literals_after = sum(len(c) for c in simplified_cores)
-        logger.info(f'[UNIT-PROP] Total literals: {total_literals_before} -> {total_literals_after}')
-    
-    return False, simplified_cores
 
 if __name__ == '__main__':
     START_TIME = time.time()
@@ -422,50 +371,6 @@ if __name__ == '__main__':
                     incremental_preconditions.append(minimized_core)
                     logger.info(f'[!] Minimized a core from size {len(condition)} to size {len(minimized_core)}')
             
-            # Apply unit propagation across all cores
-            is_unsat, simplified_cores = _unit_propagate_cores(incremental_preconditions)
-            
-            if is_unsat:
-                # UNSAT detected through unit propagation!
-                logger.info(f'[!] UNSAT detected through unit propagation of cores!')
-                logger.info(f'[!] Property {i+1}/{len(specs)} is UNSAT. All remaining properties are also UNSAT.')
-                
-                # Mark current property as UNSAT
-                status = 'unsat'
-                runtime = time.time() - START_TIME
-                
-                if args.result_file:
-                    with open(args.result_file, 'a') as fp:
-                        if args.export_runtime:
-                            print(f'unsat,{runtime:.04f}', file=fp)
-                        else:
-                            print('unsat', file=fp)
-                
-                logger.info(f'[!] Result: unsat')
-                logger.info(f'[!] Runtime: {runtime:.04f}')
-                print(f'unsat,{runtime:.04f}')
-                
-                # Mark all remaining properties as UNSAT
-                for j in range(i + 1, len(specs)):
-                    logger.info(f'[!] Verifying spec: {specs[j]}')
-                    logger.info(f'[!] Property is UNSAT due to unit propagation conflict in property {i+1} (incremental verification).')
-                    logger.info(f'[!] Result: unsat')
-                    logger.info(f'[!] Runtime: 0.0000')
-                    
-                    if args.result_file:
-                        with open(args.result_file, 'a') as fp:
-                            if args.export_runtime:
-                                print(f'unsat,0.0000', file=fp)
-                            else:
-                                print('unsat', file=fp)
-                    
-                    print(f'unsat,0.0000')
-                
-                # Exit the loop since all remaining properties are UNSAT
-                break
-            else:
-                # Update cores with simplified versions
-                incremental_preconditions = simplified_cores
         
         # output
         logger.info(f'[!] Iterations: {verifier.iteration}')
@@ -531,50 +436,6 @@ if __name__ == '__main__':
             # Add new cores to preconditions
             incremental_preconditions.extend(new_cores)
             
-            # Apply unit propagation after adding new cores
-            if len(incremental_preconditions) > 0:
-                is_unsat, simplified_cores = _unit_propagate_cores(incremental_preconditions)
-                
-                if is_unsat:
-                    # UNSAT detected through unit propagation after resolve!
-                    logger.info(f'[!] UNSAT detected through unit propagation after resolve!')
-                    logger.info(f'[!] Property {i+1}/{len(specs)} is actually UNSAT. All remaining properties are also UNSAT.')
-                    
-                    # Update status to unsat
-                    status = 'unsat'
-                    
-                    # Update result file
-                    if args.result_file:
-                        with open(args.result_file, 'a') as fp:
-                            if args.export_runtime:
-                                print(f'unsat,{runtime:.04f}', file=fp)
-                            else:
-                                print('unsat', file=fp)
-                    
-                    logger.info(f'[!] Result: unsat (corrected from sat via unit propagation)')
-                    print(f'unsat,{runtime:.04f}')
-                    
-                    # Mark all remaining properties as UNSAT
-                    for j in range(i + 1, len(specs)):
-                        logger.info(f'[!] Verifying spec: {specs[j]}')
-                        logger.info(f'[!] Property is UNSAT due to unit propagation conflict in property {i+1} (incremental verification).')
-                        logger.info(f'[!] Result: unsat')
-                        logger.info(f'[!] Runtime: 0.0000')
-                        
-                        if args.result_file:
-                            with open(args.result_file, 'a') as fp:
-                                if args.export_runtime:
-                                    print(f'unsat,0.0000', file=fp)
-                                else:
-                                    print('unsat', file=fp)
-                        
-                        print(f'unsat,0.0000')
-                    
-                    # Exit the loop since all remaining properties are UNSAT
-                    break
-                else:
-                    # Update cores with simplified versions
-                    incremental_preconditions = simplified_cores
 
         print(f'{status},{runtime:.04f}')
 
