@@ -274,13 +274,8 @@ def _unit_propagate_cores(cores):
         logger.info(f'[UNIT-PROP] EMPTY CLAUSE detected! Problem is UNSAT.')
         return True, []
     
-    # Convert remaining clauses back to list format
-    simplified_cores = []
-    for clause_tensor in sat_solver.clauses:
-        # Remove zeros (removed literals) from the clause
-        clause = [int(lit) for lit in clause_tensor if lit != 0]
-        if len(clause) > 0:
-            simplified_cores.append(clause)
+    # Use get_clauses to retrieve simplified cores including unit cores
+    simplified_cores = sat_solver.get_clauses()
     
     if len(inferred_literals) > 0:
         logger.info(f'[UNIT-PROP] Simplified cores: {len(cores)} -> {len(simplified_cores)}')

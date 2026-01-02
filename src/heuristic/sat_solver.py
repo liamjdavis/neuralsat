@@ -171,6 +171,26 @@ class SATSolver:
         self.clauses = self.clauses[haioc.any_eq_any(self.clauses, xs).logical_not_()]
         self.clauses = haioc.fill_if_eq_any(self.clauses, -xs, 0, inplace=True)
         return True
+
+    def get_clauses(self) -> list[list[int]]:
+        """
+        Returns the current set of clauses, including unit clauses derived from assignments.
+        This is useful for core simplification where we want to keep the unit cores
+        that caused simplifications.
+        """
+        result = []
+        # Add assignments as unit clauses
+        for var, value in self.assignment.items():
+            result.append([var if value else -var])
+            
+        # Add remaining clauses
+        if len(self.clauses) > 0:
+            for clause_tensor in self.clauses:
+                # Remove zeros (padding/removed literals)
+                clause = [int(lit) for lit in clause_tensor if lit != 0]
+                if len(clause) > 0:
+                    result.append(clause)
+        return result
     
 
 if __name__ == "__main__":
