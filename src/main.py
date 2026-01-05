@@ -64,7 +64,7 @@ def _resolve_with_bab(objectives, preconditions, time_limit):
 
     return new_cores
 
-def _minimize_core(objectives, condition, time_limit=100, split_impact_stats=None, removal_threshold=0.2, random_drop_percentage=0.5):
+def _minimize_core(objectives, condition, time_limit=100, split_impact_stats=None, drop_threshold=0.25, random_drop_percentage=0.5):
     """ Minimize the UNSAT core by removing literals and checking if still UNSAT """  
     if split_impact_stats is None or len(split_impact_stats) == 0:
         logger.info(f'[!] No split_impact_stats available, skipping minimization')
@@ -120,74 +120,63 @@ def _minimize_core(objectives, condition, time_limit=100, split_impact_stats=Non
     minimized_core = []
     dropped_literals = []
     
-    # determine literals to drop based on impact statistics
+
+    # Sort literals by impact (descending order, higher impact is better)
+    # We want to drop the bottom `drop_threshold` percent.
+    
+    # First, collect all impacts
+    literal_impacts = [] # (literal, impact, layer_name, neuron_id)
+    
     for literal in conflict_clause:
-        # Map literal to (layer_name, neuron_id)
         abs_literal = abs(literal)
         if abs_literal not in reversed_var_mapping:
-            # Literal not in mapping, keep it to be safe
-            logger.debug(f'[DEBUG] Literal {literal} not found in var_mapping, keeping it')
+            # Keep unmapped literals
             minimized_core.append(literal)
             continue
-        
+            
         layer_name, neuron_id = reversed_var_mapping[abs_literal]
         split_key = (layer_name, neuron_id)
         
-        # Look up impact stats
         if split_key not in split_impact_stats:
-            # No stats for this split, keep the literal
-            logger.debug(f'[DEBUG] No impact stats for ({layer_name}, {neuron_id}), keeping literal {literal}')
             minimized_core.append(literal)
             continue
-        
+            
         stats = split_impact_stats[split_key]
         
-        # Determine direction based on literal sign
-        # positive literal -> active branch (x > 0)
-        # negative literal -> inactive branch (x <= 0)
-        # However, the core contains negated literals of the decision path.
-        # If the decision was x > 0 (active), the core has -x (negative).
-        # If the decision was x <= 0 (inactive), the core has +x (positive).
-        
-        # So:
-        # literal < 0 means decision was active branch
-        # literal > 0 means decision was inactive branch
-        
-        direction_stats = None
         if 'active' in stats and 'inactive' in stats:
+            # literal < 0 means active branch decision (x > 0)
             if literal < 0:
-                direction_stats = stats['active']
+                impact = stats['active'].get('impact', 0.0)
             else:
-                direction_stats = stats['inactive']
+                impact = stats['inactive'].get('impact', 0.0)
         else:
-            # Fallback for old stats format or if direction not available
-            direction_stats = stats
-            
-        fixes = direction_stats.get('fixes', 0)
-        potential_fixes = direction_stats.get('potential_fixes', 1)
-        
-        # Calculate fixes over potential fixes ratio
-        if potential_fixes > 0:
-            ratio = fixes / potential_fixes
-        else:
-            ratio = 0.0
-        
-        # Log the fixes over potential fixes
-        branch_name = "active" if literal < 0 else "inactive"
-        logger.debug(f'[MINIMIZE] Literal {literal} ({branch_name}) -> ({layer_name}, {neuron_id}): fixes={fixes}, potential_fixes={potential_fixes}, ratio={ratio:.4f}')
-        
-        # if the fixes over potential fixes is under removal_threshold
-        if ratio < removal_threshold:
-            # don't add the literal
-            dropped_literals.append((literal, layer_name, neuron_id, ratio))
-            logger.debug(f'[MINIMIZE] Dropping literal {literal} (ratio {ratio:.4f} < threshold {removal_threshold})')
-        else:
-            # otherwise add the literal
-            minimized_core.append(literal)
-            logger.debug(f'[MINIMIZE] Keeping literal {literal} (ratio {ratio:.4f} >= threshold {removal_threshold})')
+             impact = 0.0
+             
+        literal_impacts.append((literal, impact, layer_name, neuron_id))
+
+    # Sort by impact
+    literal_impacts.sort(key=lambda x: x[1]) # Ascending order: lowest impact first
     
-    # print the minimized core vs original core
-    logger.info(f'[MINIMIZE] Original core size: {len(conflict_clause)}, Minimized core size: {len(minimized_core)}, Dropped: {len(dropped_literals)}')
+    # Determine cutoff index for dropping
+    num_literals = len(literal_impacts)
+    num_to_drop = int(num_literals * drop_threshold)
+    
+    dropped_literals_info = literal_impacts[:num_to_drop]
+    kept_literals_info = literal_impacts[num_to_drop:]
+    
+    # Add kept literals to minimized core
+    for lit, impact, lname, mid in kept_literals_info:
+        minimized_core.append(lit)
+        branch_name = "active" if lit < 0 else "inactive"
+        logger.debug(f'[MINIMIZE] Keeping literal {lit} ({branch_name}) -> ({lname}, {mid}): impact={impact:.4f}')
+        
+    # Log dropped
+    for lit, impact, lname, mid in dropped_literals_info:
+        branch_name = "active" if lit < 0 else "inactive"
+        logger.debug(f'[MINIMIZE] Dropping literal {lit} ({branch_name}) -> ({lname}, {mid}): impact={impact:.4f} (Bottom {drop_threshold*100}%)')
+    
+    dropped_literals = dropped_literals_info
+
     
     if len(minimized_core) == 0:
         logger.warning(f'[MINIMIZE] All literals dropped, choosing random literals to keep')

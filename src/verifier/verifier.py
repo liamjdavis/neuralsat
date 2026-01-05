@@ -489,121 +489,102 @@ class Verifier:
             
     @beartype
     def _update_split_impact_stats(self: 'Verifier', pruned_ret: AbstractResults, 
-                                   abstraction_ret: AbstractResults, decisions: list | torch.Tensor) -> None:
-        """Update split impact statistics after abstraction.
-        
-        For each split, calculate:
-        - Newly fixed neurons (were unstable before, now fixed)
-        - Potential fixes (unfixed neurons in layers after the split neuron)
-        - Impact metric (fixes / potential_fixes)
+                                   abstraction_ret: AbstractResults, 
+                                   decisions: list) -> None:
         """
-        if isinstance(decisions, torch.Tensor):
-            # Input splitting - skip for now
+        Update split impact statistics based on pruning results.
+        """
+        if not hasattr(self, 'split_impact_stats'):
+            self.split_impact_stats = {}
+
+        # get layer index
+        if hasattr(self.abstractor, 'net') and hasattr(self.abstractor.net, 'split_nodes'):
+            layer_to_index = {node.name: i for i, node in enumerate(self.abstractor.net.split_nodes)}
+        else:
             return
-        
-        # Get layer ordering
-        if not hasattr(self.abstractor, 'net') or not hasattr(self.abstractor.net, 'split_nodes'):
-            return
-        
-        split_node_names = [layer.name for layer in self.abstractor.net.split_nodes]
-        layer_to_index = {name: idx for idx, name in enumerate(split_node_names)}
-        
-        # Process each decision
-        for decision in decisions:
-            if not isinstance(decision, list) or len(decision) < 2:
-                continue
+
+        # Update fixes counts
+        for layer_name, lidx in layer_to_index.items():
+            if layer_name not in pruned_ret.masks:
+                 continue
             
-            layer_name, neuron_id = decision[0], decision[1]
-            split_key = (layer_name, neuron_id)
+            # pre-computation
+            pre_mask = pruned_ret.masks[layer_name]
+            post_mask = abstraction_ret.masks[layer_name]
             
+            # Repeat pre_mask to match post_mask (2 branches per domain)
+            if post_mask.shape[0] == 2 * pre_mask.shape[0]:
+                 pre_mask = torch.cat([pre_mask, pre_mask], dim=0)
+            
+            # check the number of unstable neurons
+            # batch, n_neurons
+            newly_fixed = (~pre_mask.bool() & post_mask.bool()).float()
+            
+            # sum over neurons
+            newly_fixed_sum = newly_fixed.sum(dim=1)
+            
+            # 2 * batch
+            # first half is active
+            newly_fixed_active = newly_fixed_sum[:len(decisions)]
+            newly_fixed_inactive = newly_fixed_sum[len(decisions):]
+            
+            for i, (split_layer_name, split_neuron_id, _) in enumerate(decisions):
+                split_key = (split_layer_name, split_neuron_id)
+                split_layer_idx = layer_to_index[split_layer_name]
+                
+                # only count for layers after split
+                if lidx >= split_layer_idx:
+                    if split_key not in self.split_impact_stats:
+                         self.split_impact_stats[split_key] = {
+                            'active': {'fixes': 0.0, 'potential_fixes': 0.0, 'impact': 0.0},
+                            'inactive': {'fixes': 0.0, 'potential_fixes': 0.0, 'impact': 0.0}
+                        }
+                    
+                    self.split_impact_stats[split_key]['active']['fixes'] += newly_fixed_active[i].item()
+                    self.split_impact_stats[split_key]['inactive']['fixes'] += newly_fixed_inactive[i].item()
+
+
+        # Update potential fixes and bound impact
+        # We iterate over decisions separately to handle per-decision logic
+        batch_size = len(decisions)
+        parent_lbs = pruned_ret.output_lbs.flatten()
+        child_lbs = abstraction_ret.output_lbs.flatten()
+
+        for i, (split_layer_name, split_neuron_id, _) in enumerate(decisions):
+            split_key = (split_layer_name, split_neuron_id)
             if split_key not in self.split_impact_stats:
-                continue
+                continue # Should be created above if valid
             
             stats = self.split_impact_stats[split_key]
-            if stats['pre_masks'] is None:
-                continue
             
-            # Calculate newly fixed neurons for each branch (active/inactive) separately
-            # Note: After splitting, we create 2 domains (active/inactive branches)
-            # abstraction_ret.masks has shape (2*batch, neurons)
-            # The first 'batch' elements correspond to the active branch (x>0)
-            # The second 'batch' elements correspond to the inactive branch (x<=0)
-            
-            batch_size = 0
-            # Get batch size from one of the masks
-            for m in pruned_ret.masks.values():
-                batch_size = m.shape[0]
-                break
-                
-            if batch_size == 0:
-                continue
-
-            newly_fixed_active = 0
-            newly_fixed_inactive = 0
-            
-            for lname in pruned_ret.masks.keys():
-                if lname not in stats['pre_masks']:
-                    continue
-                
-                # Count unstable before (total across batch)
-                unstable_before = stats['pre_masks'][lname]
-                
-                if lname in abstraction_ret.masks:
-                    mask = abstraction_ret.masks[lname]
-                    if mask.shape[0] != 2 * batch_size:
-                        logger.warning(f"[Split Impact] Mask shape mismatch: expected {2*batch_size}, got {mask.shape[0]}")
-                        continue
-                        
-                    # Split mask into active and inactive parts
-                    mask_active = mask[:batch_size]
-                    mask_inactive = mask[batch_size:]
-                    
-                    unstable_after_active = mask_active.sum().item()
-                    unstable_after_inactive = mask_inactive.sum().item()
-                    
-                    # Fixes = Unstable_Before - Unstable_After
-                    # Note: We compare the parent batch (unstable_before) against the specific child batch
-                    fixed_in_layer_active = max(0, unstable_before - unstable_after_active)
-                    fixed_in_layer_inactive = max(0, unstable_before - unstable_after_inactive)
-                    
-                    newly_fixed_active += fixed_in_layer_active
-                    newly_fixed_inactive += fixed_in_layer_inactive
-            
-            # Calculate potential fixes (unfixed neurons in layers after split neuron)
-            split_layer_idx = layer_to_index.get(layer_name, -1)
-            if split_layer_idx == -1:
-                continue
-            
+            # Calculate potential fixes
+            split_layer_idx = layer_to_index[split_layer_name]
             potential_fixes = 0
             for lname, lidx in layer_to_index.items():
                 if lidx >= split_layer_idx:
                     if lname in stats['pre_masks']:
                         unstable_count = stats['pre_masks'][lname]
                         potential_fixes += unstable_count
-
             
-            # Update statistics for active branch
-            stats['active']['fixes'] += newly_fixed_active
             stats['active']['potential_fixes'] = potential_fixes
-            if potential_fixes + 1 > 0:
-                stats['active']['impact'] = stats['active']['fixes'] / (potential_fixes + 1)
-            else:
-                stats['active']['impact'] = 0.0
-                
-            # Update statistics for inactive branch
-            stats['inactive']['fixes'] += newly_fixed_inactive
             stats['inactive']['potential_fixes'] = potential_fixes
-            if potential_fixes + 1 > 0:
-                stats['inactive']['impact'] = stats['inactive']['fixes'] / (potential_fixes + 1)
-            else:
-                stats['inactive']['impact'] = 0.0
+
+            # Calculate bound impact
+            parent_lb = parent_lbs[i].item()
+            # Active branch (first half)
+            active_lb = child_lbs[i].item()
+            active_impact = active_lb - parent_lb
             
-            # Clear pre_masks to save memory
-            stats['pre_masks'] = None
+            # Inactive branch (second half)
+            inactive_lb = child_lbs[i + batch_size].item()
+            inactive_impact = inactive_lb - parent_lb
             
-            logger.debug(f'[Split Impact] Neuron ({layer_name}, {neuron_id}): '
-                        f'Active: fixes={newly_fixed_active}, impact={stats["active"]["impact"]:.4f} | '
-                        f'Inactive: fixes={newly_fixed_inactive}, impact={stats["inactive"]["impact"]:.4f}')
+            stats['active']['impact'] += active_impact
+            stats['inactive']['impact'] += inactive_impact
+            
+            logger.debug(f'[Split Impact] Neuron ({split_layer_name}, {split_neuron_id}): '
+                        f'Active: fixes={newly_fixed_active[i].item()}, impact={stats["active"]["impact"]:.4f} | '
+                        f'Inactive: fixes={newly_fixed_inactive[i].item()}, impact={stats["inactive"]["impact"]:.4f}')
     
     @beartype
     def _parallel_dpll(self: 'Verifier') -> None:
