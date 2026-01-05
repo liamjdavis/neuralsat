@@ -11,6 +11,7 @@ import copy
 import math
 import time
 import os
+from heuristic.util import compute_masks
 
 from .auto_LiRPA.utils import stop_criterion_batch_any
 from .auto_LiRPA import BoundedModule
@@ -430,6 +431,13 @@ class NetworkAbstractor:
         assert all([_.shape[0] == 2 * batch for _ in double_lAs.values()]), print([_.shape for _ in double_lAs.values()])
         assert len(double_histories) == len(double_betas) == 2 * batch
             
+        # compute masks
+        double_masks = compute_masks(
+            lower_bounds=double_lower_bounds,
+            upper_bounds=double_upper_bounds,
+            device=self.device,
+        )
+
         return AbstractResults(**{
             'objective_ids': double_objective_ids,
             'output_lbs': double_lower_bounds[self.net.final_name], 
@@ -438,6 +446,7 @@ class NetworkAbstractor:
             'lAs': double_lAs, 
             'lower_bounds': double_lower_bounds, 
             'upper_bounds': double_upper_bounds, 
+            'masks': double_masks,
             'slopes': double_slopes, 
             'betas': double_betas, 
             'histories': double_histories,
@@ -640,6 +649,7 @@ class NetworkAbstractor:
         return f'{self.__class__.__name__}({self.mode}, {self.method})'
         
         
+
     from .utils import (
         new_input,
         get_slope, set_slope,

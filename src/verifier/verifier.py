@@ -483,9 +483,10 @@ class Verifier:
                 if lname not in self.split_impact_stats[split_key]['pre_masks']:
                     # Count unstable neurons (True in mask means unstable)
                     # masks shape: (batch, neurons)
-                    unstable_count = pruned_ret.masks[lname].sum().item()
-                    self.split_impact_stats[split_key]['pre_masks'][lname] = unstable_count
-    
+                    if pruned_ret.masks[lname].shape[0] > 0:
+                        unstable_count = pruned_ret.masks[lname].sum().item()
+                        self.split_impact_stats[split_key]['pre_masks'][lname] = unstable_count
+            
     @beartype
     def _update_split_impact_stats(self: 'Verifier', pruned_ret: AbstractResults, 
                                    abstraction_ret: AbstractResults, decisions: list | torch.Tensor) -> None:
@@ -575,10 +576,11 @@ class Verifier:
             
             potential_fixes = 0
             for lname, lidx in layer_to_index.items():
-                if lidx > split_layer_idx:
+                if lidx >= split_layer_idx:
                     if lname in stats['pre_masks']:
                         unstable_count = stats['pre_masks'][lname]
                         potential_fixes += unstable_count
+
             
             # Update statistics for active branch
             stats['active']['fixes'] += newly_fixed_active

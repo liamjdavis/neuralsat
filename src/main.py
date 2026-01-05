@@ -113,6 +113,8 @@ def _minimize_core(objectives, condition, time_limit=100, split_impact_stats=Non
     else:
         conflict_clause = condition
     
+    logger.info(f"[MINIMIZE] Core BEFORE minimization (Size {len(conflict_clause)}): {conflict_clause}")
+    
     reversed_var_mapping = temp_verifier.domains_list.reversed_var_mapping
     
     minimized_core = []
@@ -172,7 +174,7 @@ def _minimize_core(objectives, condition, time_limit=100, split_impact_stats=Non
         
         # Log the fixes over potential fixes
         branch_name = "active" if literal < 0 else "inactive"
-        logger.info(f'[MINIMIZE] Literal {literal} ({branch_name}) -> ({layer_name}, {neuron_id}): fixes={fixes}, potential_fixes={potential_fixes}, ratio={ratio:.4f}')
+        logger.debug(f'[MINIMIZE] Literal {literal} ({branch_name}) -> ({layer_name}, {neuron_id}): fixes={fixes}, potential_fixes={potential_fixes}, ratio={ratio:.4f}')
         
         # if the fixes over potential fixes is under removal_threshold
         if ratio < removal_threshold:
@@ -219,7 +221,7 @@ def _minimize_core(objectives, condition, time_limit=100, split_impact_stats=Non
         logger.info(f'[MINIMIZE] Minimized core is still UNSAT, returning minimized core')
 
         # print minimized core
-        logger.debug(f'[MINIMIZE] Minimized core literals: {minimized_core}')
+        logger.info(f'[MINIMIZE] Core AFTER minimization (Size {len(minimized_core)}): {minimized_core}')
         del temp_verifier
         if 'cuda' in args.device:
             gc.collect()
@@ -363,7 +365,7 @@ if __name__ == '__main__':
             incremental_preconditions.sort(key=lambda x: len(x), reverse=False)
 
             # minimize three shortest conflict clauses 
-            for condition in incremental_preconditions[:3]:
+            for condition in incremental_preconditions:
                 minimized_core = _minimize_core(objectives, condition, split_impact_stats=verifier.split_impact_stats)
 
                 if minimized_core is not None:
