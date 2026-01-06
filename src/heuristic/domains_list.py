@@ -38,7 +38,8 @@ class DomainsList:
                  cs: torch.Tensor, 
                  rhs: torch.Tensor, 
                  input_split: bool = False, 
-                 preconditions: dict = {}) -> None:
+                 preconditions: dict = {},
+                 resolve_for_cores: bool = False) -> None:
 
         self.net = net
         self.final_name = self.net.final_node_name
@@ -52,8 +53,33 @@ class DomainsList:
         # Initialized empty; populated by save_conflict_clauses when domains prove UNSAT
         self.global_unsat_cores = []  # List[List[int]] - SAT clauses learned from all properties
         
+        # Populate global_unsat_cores with initial preconditions
+        if len(preconditions) > 0:
+            # preconditions is {obj_id: [clauses/histories]}
+            # We iterate over the first objective's preconditions since they are duplicated across all objectives
+            first_key = next(iter(preconditions))
+            
+            # Helper to convert histories to clauses if needed
+            from heuristic.util import _history_to_conflict_clause
+            
+            for cond in preconditions[first_key]:
+                if isinstance(cond, list):
+                    # Already a clause
+                    self.global_unsat_cores.append(cond)
+                elif isinstance(cond, dict):
+                    # Convert history dict to clause
+                    # Note: We need var_mapping, which is a property that computes on demand
+                    clause = _history_to_conflict_clause(cond, self.var_mapping)
+                    if len(clause) > 0:
+                        self.global_unsat_cores.append(clause)
+        
         # unverified indices 
-        remain_idx = torch.where((output_lbs.detach().cpu() <= rhs.detach().cpu()).all(1))[0]
+        if resolve_for_cores:
+            # When resolving for cores, keep all objectives even if already verified
+            remain_idx = torch.arange(len(output_lbs))
+            logger.info(f'[resolve_for_cores=True] Keeping all {len(remain_idx)} objectives for UNSAT core collection')
+        else:
+            remain_idx = torch.where((output_lbs.detach().cpu() <= rhs.detach().cpu()).all(1))[0]
         
         # decisions
         all_histories = [_copy_history(histories) for _ in range(len(cs))] if not input_split else None
@@ -318,12 +344,27 @@ class DomainsList:
                             continue
                         
                         # run BCP to detect implied conflicts
-                        bcp_stat, _ = temp_solver.bcp()
+                        bcp_stat, bcp_vars = temp_solver.bcp()
                         if not bcp_stat:
                             global_conflict_index.append(idx_int)
                             logger.debug(f'[Global core] Pruned domain {idx_int} via BCP conflict')
                             continue
-                
+                        
+                        # Active pruning: use inferred literals to tighten bounds
+                        if len(bcp_vars) > 0:
+                            update_stats = [self.update_hidden_bounds_histories(
+                                    lower_bounds=domain_params.lower_bounds, 
+                                    upper_bounds=domain_params.upper_bounds, 
+                                    histories=domain_params.histories, 
+                                    literal=lit, 
+                                    batch_idx=idx_int) 
+                                for lit in bcp_vars]
+                            
+                            if not all(update_stats):
+                                global_conflict_index.append(idx_int)
+                                logger.debug(f'[Global core] Pruned domain {idx_int} via BCP tightening conflict')
+                                continue
+
                 # Remove globally-conflicted domains from remaining_index
                 if len(global_conflict_index):
                     logger.info(f'[Global core] Pruned {len(global_conflict_index)} domains')
