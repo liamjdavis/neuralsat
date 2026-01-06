@@ -344,12 +344,27 @@ class DomainsList:
                             continue
                         
                         # run BCP to detect implied conflicts
-                        bcp_stat, _ = temp_solver.bcp()
+                        bcp_stat, bcp_vars = temp_solver.bcp()
                         if not bcp_stat:
                             global_conflict_index.append(idx_int)
                             logger.debug(f'[Global core] Pruned domain {idx_int} via BCP conflict')
                             continue
-                
+                        
+                        # Active pruning: use inferred literals to tighten bounds
+                        if len(bcp_vars) > 0:
+                            update_stats = [self.update_hidden_bounds_histories(
+                                    lower_bounds=domain_params.lower_bounds, 
+                                    upper_bounds=domain_params.upper_bounds, 
+                                    histories=domain_params.histories, 
+                                    literal=lit, 
+                                    batch_idx=idx_int) 
+                                for lit in bcp_vars]
+                            
+                            if not all(update_stats):
+                                global_conflict_index.append(idx_int)
+                                logger.debug(f'[Global core] Pruned domain {idx_int} via BCP tightening conflict')
+                                continue
+
                 # Remove globally-conflicted domains from remaining_index
                 if len(global_conflict_index):
                     logger.info(f'[Global core] Pruned {len(global_conflict_index)} domains')
