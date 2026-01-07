@@ -92,13 +92,7 @@ if __name__ == '__main__':
     logger.info(f'[!] Input shape: {input_shape}')
     logger.info(f'[!] Output shape: {output_shape}')
     
-    # verifier
-    verifier = Verifier(
-        net=model, 
-        input_shape=input_shape, 
-        batch=args.batch,
-        device=args.device,
-    )
+
 
     # remove result file if exists
     if args.result_file and os.path.exists(args.result_file):
@@ -108,6 +102,14 @@ if __name__ == '__main__':
 
     for i, spec in enumerate(specs):
         logger.info(f'[!] Verifying spec: {spec}')
+        
+        # verifier
+        verifier = Verifier(
+            net=model, 
+            input_shape=input_shape, 
+            batch=args.batch,
+            device=args.device,
+        )
         
         # specification
         objectives = parse_vnnlib(spec, input_shape)
@@ -174,3 +176,6 @@ if __name__ == '__main__':
             break
         
         print(f'{status},{runtime:.04f}')
+        
+        del verifier
+        torch.cuda.empty_cache()
