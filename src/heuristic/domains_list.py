@@ -47,6 +47,9 @@ class DomainsList:
         self.visited = len(input_lowers)
         self.all_conflict_clauses = {int(_): [] for _ in objective_ids}
         self.use_restart = Settings.use_restart and (lower_bounds is not None) and (not input_split)
+
+        # knapsack cut manager. Set by Verifier._verify_one after init.
+        self.knapsack = None
         
         # unverified indices 
         remain_idx = torch.where((output_lbs.detach().cpu() <= rhs.detach().cpu()).all(1))[0]
@@ -280,9 +283,35 @@ class DomainsList:
         # assert decisions is not None
         batch = len(domain_params.input_lowers)
         assert batch > 0
-        
+
+        # knapsack: prune-implied rows + harvest cuts from verified rows.
+        # Runs only when manager is wired (hidden-split path with cuts enabled).
+        if (self.knapsack is not None and self.knapsack._initialized
+                and not self.input_split and domain_params.lower_bounds is not None):
+            interm = {k: [domain_params.lower_bounds[k], domain_params.upper_bounds[k]]
+                      for k in domain_params.lower_bounds}
+            implied = self.knapsack.check_pruning(batch_size=batch, interm_bounds=interm)
+            if implied is not None and implied.any():
+                bumped = domain_params.output_lbs.clone()
+                rhs_dev = domain_params.rhs.to(bumped.device)
+                mask_2d = implied.to(bumped.device).unsqueeze(1).expand_as(bumped)
+                bumped = torch.where(mask_2d, rhs_dev + 1.0, bumped)
+                domain_params = domain_params._replace(output_lbs=bumped)
+
         # unverified indices
         remaining_index = torch.where((domain_params.output_lbs.detach().cpu() <= domain_params.rhs.detach().cpu()).all(1))[0]
+
+        # knapsack: collect cut groups from naturally verified rows.
+        if (self.knapsack is not None and self.knapsack._initialized
+                and not self.input_split and domain_params.histories is not None
+                and domain_params.lower_bounds is not None):
+            self.knapsack.collect_from_verified(
+                histories=domain_params.histories,
+                output_lbs=domain_params.output_lbs,
+                rhs=domain_params.rhs,
+                row_lower_bounds=domain_params.lower_bounds,
+                row_upper_bounds=domain_params.upper_bounds,
+            )
         if os.environ.get('NEURALSAT_SYNTHETIC_BUG_DROP_PROBABILITY'):
             probability = float(os.environ.get('NEURALSAT_SYNTHETIC_BUG_DROP_PROBABILITY'))
             kept_mask = torch.rand(len(remaining_index)) > probability

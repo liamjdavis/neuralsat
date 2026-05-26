@@ -281,61 +281,74 @@ class Verifier:
                 raise VerifierInitializeError('[_verify_one] Unknown exception')
         except:
             raise VerifierInitializeError('[_verify_one] Unknown error')
-        
+
         if os.environ.get('NEURALSAT_DEBUG'):
             print(f'[+] verify _initialize:', get_used_gpu_memory(), 'MB')
-                
+
         # cleaning
         torch.cuda.empty_cache()
         if hasattr(self, 'milp_tightener'):
             self.milp_tightener.reset()
-            
+
         if hasattr(self, 'gpu_tightener'):
             self.gpu_tightener.reset()
+
+        # knapsack cuts: bootstrap manager once per objective (DAG is graph-level).
+        if Settings.use_knapsack_cuts and not self.input_split and isinstance(self.domains_list, DomainsList):
+            from heuristic.knapsack_cuts import KnapsackCutManager
+            if not hasattr(self, 'knapsack') or self.knapsack is None:
+                self.knapsack = KnapsackCutManager()
+            self.knapsack.initialize(self.abstractor.net)
+            self.domains_list.knapsack = self.knapsack
         
         # main loop
         start_time = time.time()
         start_iteration = self.iteration
 
-        while len(self.domains_list) > 0:
-            # early stop
-            if self.domains_list.minimum_lowers < Settings.skip_initial_worst_bound:
-                return ReturnStatus.EARLY_STOP
-            
-            # search
-            self._parallel_dpll()
-                
-            # check adv founded
-            if self.adv is not None:
-                if self._check_adv(self.adv, objective):
-                    return ReturnStatus.SAT
-                logger.debug("[!] Invalid counter-example")
-                # FIXME
-                return ReturnStatus.INVALID_CEX
-                self.adv = None
-            
-            # check timeout
-            if self._check_timeout(timeout):
-                return ReturnStatus.TIMEOUT
-            
-            # check restart
-            if self._check_restart(start_time=start_time, start_iteration=start_iteration):
-                return ReturnStatus.RESTART
-        
-            # check unsolvable
-            if len(self.domains_list) > Settings.max_domains:
-                return ReturnStatus.UNKNOWN
-            
-            # gpu tightening early stop
-            if self._stop_gpu_tightening():
-                return ReturnStatus.UNKNOWN
-            
-            # early stop
-            if self.iteration >= Settings.max_iterations:
-                return ReturnStatus.EARLY_STOP
-            
-        
-        return ReturnStatus.UNSAT
+        try:
+            while len(self.domains_list) > 0:
+                # early stop
+                if self.domains_list.minimum_lowers < Settings.skip_initial_worst_bound:
+                    return ReturnStatus.EARLY_STOP
+
+                # search
+                self._parallel_dpll()
+
+                # check adv founded
+                if self.adv is not None:
+                    if self._check_adv(self.adv, objective):
+                        return ReturnStatus.SAT
+                    logger.debug("[!] Invalid counter-example")
+                    # FIXME
+                    return ReturnStatus.INVALID_CEX
+                    self.adv = None
+
+                # check timeout
+                if self._check_timeout(timeout):
+                    return ReturnStatus.TIMEOUT
+
+                # check restart
+                if self._check_restart(start_time=start_time, start_iteration=start_iteration):
+                    return ReturnStatus.RESTART
+
+                # check unsolvable
+                if len(self.domains_list) > Settings.max_domains:
+                    return ReturnStatus.UNKNOWN
+
+                # gpu tightening early stop
+                if self._stop_gpu_tightening():
+                    return ReturnStatus.UNKNOWN
+
+                # early stop
+                if self.iteration >= Settings.max_iterations:
+                    return ReturnStatus.EARLY_STOP
+
+
+            return ReturnStatus.UNSAT
+        finally:
+            if (Settings.use_knapsack_cuts and hasattr(self, 'knapsack')
+                    and self.knapsack is not None and self.knapsack._initialized):
+                self.knapsack.print_summary()
     
     
     @beartype

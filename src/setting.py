@@ -49,6 +49,10 @@ class GlobalSettings(BaseSettings):
         
         # decomposition
         self.use_decompose = False
+
+        # knapsack cuts (topology-aware prune-only cuts inferred at verified leaves)
+        self.use_knapsack_cuts = False
+        self.use_knapsack_cuts_debug = False
         
     
     def _add_advanced_settings(self, args=None):
